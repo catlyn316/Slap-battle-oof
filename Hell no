@@ -29,7 +29,7 @@ local toggles = {
     noclip=false, noFilter=false, slapAura=false
 }
 local values = {
-    speed=70, jump=75, gravity=50, fullbright=0.8,
+    speed=25, jump=75, gravity=50, fullbright=0.8,
     cameraDist=15, brightness=2, wallTrans=0.8, floatSpeed=1, auraRange=17
 }
 local connections = {
@@ -45,9 +45,9 @@ local isDownButtonPressed = false
 -- Slap Aura 狀態
 local auraEnabled = false
 local auraLoop = nil
-local auraDetectedEvent = nil
-local auraDetectedArgs = nil
+local auraDetectedEvents = {}
 local auraHookActive = false
+local auraLastFire = 0
 
 local function getOriginalValues()
     if toggles.speed or toggles.jump or toggles.gravity then return end
@@ -166,37 +166,72 @@ end
 -- ══════════════════════════════════════════
 -- Slap Aura Hook（只設一次，Delta 支援）
 -- ══════════════════════════════════════════
+-- hook 只負責：記錄事件 + 標記「剛剛有攻擊」
+-- 實際的 aura 觸發交給 RunService 循環處理，避免在 hook 環境裡 FireServer
+local auraPendingFire = false  -- 旗標：RunService 看到後觸發一次
+
 local function startAuraHook()
     if auraHookActive then return end
     auraHookActive = true
     local origNamecall
     origNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
-        if auraEnabled and not auraDetectedEvent then
-            if method == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
-                local args = {...}
-                local found = false
-                for _, v in ipairs(args) do
-                    if typeof(v) == "Instance" then
-                        if v:IsA("Player") and v ~= player then found=true; break end
-                        if v:IsA("Model") and v:FindFirstChildOfClass("Humanoid") and v ~= player.Character then found=true; break end
-                        if v:IsA("BasePart") then
-                            local p = v.Parent
-                            if p and p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") and p ~= player.Character then found=true; break end
-                        end
+
+        -- 先讓原本呼叫正常執行
+        local result = origNamecall(self, ...)
+
+        -- 判斷是否為針對其他玩家的攻擊事件
+        if auraEnabled and method == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+            local args = {...}
+            local found = false
+            for _, v in ipairs(args) do
+                if typeof(v) == "Instance" then
+                    if v:IsA("Player") and v ~= player then found=true; break end
+                    if v:IsA("Model") and v:FindFirstChildOfClass("Humanoid") and v ~= player.Character then found=true; break end
+                    if v:IsA("BasePart") then
+                        local p = v.Parent
+                        if p and p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") and p ~= player.Character then found=true; break end
                     end
                 end
-                if found then
-                    auraDetectedEvent = self
-                    auraDetectedArgs = args
-                    warn("[Slap Aura] 偵測到: " .. self.Name .. " 參數:" .. #args)
+            end
+            if found then
+                -- 記錄事件模板（避免重複）
+                local alreadyCaptured = false
+                for _, entry in ipairs(auraDetectedEvents) do
+                    if entry.event == self then alreadyCaptured=true; break end
+                end
+                if not alreadyCaptured then
+                    table.insert(auraDetectedEvents, {event=self, args=args})
+                    warn("[Slap Aura] 新增事件: " .. self.Name .. " 共" .. #auraDetectedEvents .. "個")
+                end
+
+                -- 標記「剛剛攻擊了」，RunService 那邊會處理 aura 觸發
+                local now = tick()
+                if now - auraLastFire >= 1 then
+                    auraPendingFire = true
                 end
             end
         end
-        return origNamecall(self, ...)
+
+        return result
     end)
 end
 pcall(startAuraHook)
+
+-- RunService 循環：監看 auraPendingFire 旗標，在 hook 環境外安全觸發
+RunService.Heartbeat:Connect(function()
+    if not auraEnabled then return end
+    if not auraPendingFire then return end
+    if #auraDetectedEvents == 0 then auraPendingFire=false; return end
+
+    auraPendingFire = false
+    auraLastFire = tick()
+
+    local target = getNearestInRange(values.auraRange)
+    if target then
+        fireAllAuraEvents(target)
+    end
+end)
 
 local function getNearestInRange(range)
     local char = player.Character
@@ -211,6 +246,31 @@ local function getNearestInRange(range)
     end
     return nearest
 end
+
+local function fireAllAuraEvents(target)
+    for _, entry in ipairs(auraDetectedEvents) do
+        local newArgs = {}
+        for _, v in ipairs(entry.args) do
+            local replaced = false
+            if typeof(v) == "Instance" then
+                if v:IsA("Player") and v ~= player then
+                    table.insert(newArgs, target); replaced=true
+                elseif v:IsA("Model") and v:FindFirstChildOfClass("Humanoid") and v ~= player.Character then
+                    table.insert(newArgs, target.Character or v); replaced=true
+                elseif v:IsA("BasePart") then
+                    local p = v.Parent
+                    if p and p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") and p ~= player.Character then
+                        local tp = target.Character and target.Character:FindFirstChild(v.Name) or v
+                        table.insert(newArgs, tp); replaced=true
+                    end
+                end
+            end
+            if not replaced then table.insert(newArgs, v) end
+        end
+        pcall(function() entry.event:FireServer(table.unpack(newArgs)) end)
+    end
+end
+
 
 player.CharacterAdded:Connect(function(newChar)
     task.wait(0.5)
@@ -343,7 +403,7 @@ local function createControlRow(parent, labelText, placeholder, defaultVal, isIn
 end
 
 -- 頁面1：基礎移動（無限跳已移除）
-local speedFrame,speedInput,speedButton=createControlRow(page1,"速度:","70","70",true,1)
+local speedFrame,speedInput,speedButton=createControlRow(page1,"速度:","25","25",true,1)
 local jumpFrame,jumpInput,jumpButton=createControlRow(page1,"跳躍:","75","75",true,2)
 local gravFrame,gravInput,gravButton=createControlRow(page1,"重力:","50","50",true,3)
 
@@ -421,7 +481,7 @@ end
 
 speedButton.MouseButton1Click:Connect(function()
     toggles.speed=not toggles.speed
-    if toggles.speed then if not hasOriginalValues then getOriginalValues() end; values.speed=tonumber(speedInput.Text) or 70; applySpeed()
+    if toggles.speed then if not hasOriginalValues then getOriginalValues() end; values.speed=tonumber(speedInput.Text) or 25; applySpeed()
     else applySpeed() end
     toggleUIState(speedButton,speedFrame,speedInput,toggles.speed)
 end)
@@ -632,47 +692,25 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- Slap Aura 開關
+
 auraToggleBtn.MouseButton1Click:Connect(function()
-    auraEnabled=not auraEnabled
+    auraEnabled = not auraEnabled
     if auraEnabled then
         auraToggleBtn.Text="解除"; auraToggleBtn.BackgroundColor3=Color3.fromRGB(244,67,54)
         auraStateText.Text="開啟"; auraStateText.TextColor3=Color3.fromRGB(46,125,50)
         auraStatusFrame.BackgroundColor3=Color3.fromRGB(227,242,253)
-        values.auraRange=tonumber(auraRangeInput.Text) or 17
-        auraDetectedEvent=nil; auraDetectedArgs=nil
-        auraLoop=task.spawn(function()
-            while auraEnabled do
-                task.wait(1)
-                if not auraEnabled then break end
-                local target=getNearestInRange(values.auraRange)
-                if target and auraDetectedEvent then
-                    local newArgs={}
-                    for _,v in ipairs(auraDetectedArgs) do
-                        local replaced=false
-                        if typeof(v)=="Instance" then
-                            if v:IsA("Player") and v~=player then
-                                table.insert(newArgs,target); replaced=true
-                            elseif v:IsA("Model") and v:FindFirstChildOfClass("Humanoid") and v~=player.Character then
-                                table.insert(newArgs,target.Character or v); replaced=true
-                            elseif v:IsA("BasePart") then
-                                local p=v.Parent
-                                if p and p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") and p~=player.Character then
-                                    local tp=target.Character and target.Character:FindFirstChild(v.Name) or v
-                                    table.insert(newArgs,tp); replaced=true
-                                end
-                            end
-                        end
-                        if not replaced then table.insert(newArgs,v) end
-                    end
-                    pcall(function() auraDetectedEvent:FireServer(table.unpack(newArgs)) end)
-                end
-            end
-        end)
+        values.auraRange = tonumber(auraRangeInput.Text) or 17
+        -- 重置捕捉列表，讓 hook 重新偵測新工具的事件
+        auraDetectedEvents = {}
+        auraLastFire = 0
+
+        -- hook 已在載入時掛上，開啟後自動在玩家攻擊時順帶觸發 aura
+        -- auraDetectedEvents 和 auraLastFire 已在上方重置
     else
         auraToggleBtn.Text="啟動"; auraToggleBtn.BackgroundColor3=Color3.fromRGB(76,175,80)
         auraStateText.Text="關閉"; auraStateText.TextColor3=Color3.fromRGB(150,150,150)
         auraStatusFrame.BackgroundColor3=Color3.fromRGB(248,249,250)
-        if auraLoop then task.cancel(auraLoop); auraLoop=nil end
+        if auraTouchConn then auraTouchConn:Disconnect(); auraTouchConn=nil end
     end
     updateStatus()
 end)
@@ -704,6 +742,7 @@ expandButton.MouseButton1Click:Connect(function() miniFrame.Visible=false; mainF
 
 closeButton.MouseButton1Click:Connect(function()
     if auraLoop then task.cancel(auraLoop) end
+    if auraTouchConn then auraTouchConn:Disconnect() end
     screenGui:Destroy()
     for _, v in pairs(connections) do if v then v:Disconnect() end end
     Lighting.Ambient=trueLightingBackup.Ambient; Lighting.Brightness=trueLightingBackup.Brightness
