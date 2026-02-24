@@ -242,21 +242,6 @@ local function fireAllAuraEvents(target)
     end
 end
 
--- RunService 循環：監看 auraPendingFire 旗標，在 hook 環境外安全觸發
-RunService.Heartbeat:Connect(function()
-    if not auraEnabled then return end
-    if not auraPendingFire then return end
-    if #auraDetectedEvents == 0 then auraPendingFire=false; return end
-
-    auraPendingFire = false
-    auraLastFire = tick()
-
-    local target = getNearestInRange(values.auraRange)
-    if target then
-        fireAllAuraEvents(target)
-    end
-end)
-
 local function getNearestInRange(range)
     local char = player.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
@@ -271,7 +256,20 @@ local function getNearestInRange(range)
     return nearest
 end
 
+-- RunService 循環：hook 攔截到攻擊 → auraPendingFire = true → 在 hook 外安全觸發
+RunService.Heartbeat:Connect(function()
+    if not auraEnabled then return end
+    if not auraPendingFire then return end
+    if #auraDetectedEvents == 0 then auraPendingFire=false; return end
 
+    auraPendingFire = false
+    auraLastFire = tick()
+
+    local target = getNearestInRange(values.auraRange)
+    if target then
+        fireAllAuraEvents(target)
+    end
+end)
 
 player.CharacterAdded:Connect(function(newChar)
     task.wait(0.5)
@@ -696,6 +694,44 @@ end)
 
 -- Slap Aura 開關
 
+-- 監聽工具 Activated（平板點擊攻擊時觸發）
+local auraActivatedConn = nil
+
+local function setupAuraActivated()
+    if auraActivatedConn then auraActivatedConn:Disconnect(); auraActivatedConn=nil end
+    local char = player.Character
+    if not char then return end
+    -- 找當前裝備的工具
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then return end
+    auraActivatedConn = tool.Activated:Connect(function()
+        if not auraEnabled then return end
+        local now = tick()
+        if now - auraLastFire < 1 then return end
+        auraPendingFire = true
+    end)
+end
+
+-- 角色重生或換工具時重新綁定
+player.CharacterAdded:Connect(function(newChar)
+    task.wait(0.5)
+    if auraEnabled then setupAuraActivated() end
+    newChar.ChildAdded:Connect(function(child)
+        if child:IsA("Tool") and auraEnabled then
+            task.wait(0.1)
+            setupAuraActivated()
+        end
+    end)
+end)
+if player.Character then
+    player.Character.ChildAdded:Connect(function(child)
+        if child:IsA("Tool") and auraEnabled then
+            task.wait(0.1)
+            setupAuraActivated()
+        end
+    end)
+end
+
 auraToggleBtn.MouseButton1Click:Connect(function()
     auraEnabled = not auraEnabled
     if auraEnabled then
@@ -703,17 +739,14 @@ auraToggleBtn.MouseButton1Click:Connect(function()
         auraStateText.Text="開啟"; auraStateText.TextColor3=Color3.fromRGB(46,125,50)
         auraStatusFrame.BackgroundColor3=Color3.fromRGB(227,242,253)
         values.auraRange = tonumber(auraRangeInput.Text) or 17
-        -- 重置捕捉列表，讓 hook 重新偵測新工具的事件
         auraDetectedEvents = {}
         auraLastFire = 0
-
-        -- hook 已在載入時掛上，開啟後自動在玩家攻擊時順帶觸發 aura
-        -- auraDetectedEvents 和 auraLastFire 已在上方重置
+        setupAuraActivated()
     else
         auraToggleBtn.Text="啟動"; auraToggleBtn.BackgroundColor3=Color3.fromRGB(76,175,80)
         auraStateText.Text="關閉"; auraStateText.TextColor3=Color3.fromRGB(150,150,150)
         auraStatusFrame.BackgroundColor3=Color3.fromRGB(248,249,250)
-        if auraTouchConn then auraTouchConn:Disconnect(); auraTouchConn=nil end
+        if auraActivatedConn then auraActivatedConn:Disconnect(); auraActivatedConn=nil end
     end
     updateStatus()
 end)
