@@ -48,6 +48,7 @@ local auraLoop = nil
 local auraDetectedEvents = {}
 local auraHookActive = false
 local auraLastFire = 0
+local faceCenterEnabled = false  -- 觸發前先面向 (0,0,0)
 
 local function getOriginalValues()
     if toggles.speed or toggles.jump or toggles.gravity then return end
@@ -218,33 +219,44 @@ local function startAuraHook()
 end
 pcall(startAuraHook)
 
--- RunService 循環：監看 auraPendingFire 旗標，在 hook 環境外安全觸發
-RunService.Heartbeat:Connect(function()
-    if not auraEnabled then return end
-    if not auraPendingFire then return end
-    if #auraDetectedEvents == 0 then auraPendingFire=false; return end
-
-    auraPendingFire = false
-    auraLastFire = tick()
-
-    local target = getNearestInRange(values.auraRange)
-    if target then
-        fireAllAuraEvents(target)
-    end
-end)
-
-local function getNearestInRange(range)
+-- 面向中央：只旋轉 Y 軸（左右），保留原本的 Y 座標高度和 shiftlock 狀態
+local function faceAndFire(fireFn)
     local char = player.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
-    local myPos = char.HumanoidRootPart.Position
-    local nearest, nearestDist = nil, math.huge
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= player and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-            local dist = (p.Character.HumanoidRootPart.Position - myPos).Magnitude
-            if dist <= range and dist < nearestDist then nearest=p; nearestDist=dist end
-        end
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not faceCenterEnabled or not hrp then
+        fireFn()
+        return
     end
-    return nearest
+
+    -- 記錄原本朝向
+    local originalCFrame = hrp.CFrame
+
+    -- 記錄並暫時停用 ShiftLock（透過 CameraMode）
+    local originalCameraMode = player.CameraMode
+    local wasShiftLocked = (originalCameraMode == Enum.CameraMode.LockFirstPerson)
+    if wasShiftLocked then
+        player.CameraMode = Enum.CameraMode.Classic
+    end
+
+    -- 面向 (0,0,0)：只旋轉 Y 軸，X/Z 朝向中央
+    local myPos = hrp.Position
+    local lookDir = Vector3.new(0 - myPos.X, 0, 0 - myPos.Z)
+    if lookDir.Magnitude > 0.01 then
+        hrp.CFrame = CFrame.new(myPos, myPos + lookDir)
+    end
+
+    -- 觸發事件
+    fireFn()
+
+    -- 恢復朝向和 shiftlock
+    task.defer(function()
+        if hrp and hrp.Parent then
+            hrp.CFrame = originalCFrame
+        end
+        if wasShiftLocked then
+            player.CameraMode = originalCameraMode
+        end
+    end)
 end
 
 local function fireAllAuraEvents(target)
@@ -270,6 +282,38 @@ local function fireAllAuraEvents(target)
         pcall(function() entry.event:FireServer(table.unpack(newArgs)) end)
     end
 end
+
+-- RunService 循環：監看 auraPendingFire 旗標，在 hook 環境外安全觸發
+RunService.Heartbeat:Connect(function()
+    if not auraEnabled then return end
+    if not auraPendingFire then return end
+    if #auraDetectedEvents == 0 then auraPendingFire=false; return end
+
+    auraPendingFire = false
+    auraLastFire = tick()
+
+    local target = getNearestInRange(values.auraRange)
+    if target then
+        faceAndFire(function()
+            fireAllAuraEvents(target)
+        end)
+    end
+end)
+
+local function getNearestInRange(range)
+    local char = player.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    local myPos = char.HumanoidRootPart.Position
+    local nearest, nearestDist = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+            local dist = (p.Character.HumanoidRootPart.Position - myPos).Magnitude
+            if dist <= range and dist < nearestDist then nearest=p; nearestDist=dist end
+        end
+    end
+    return nearest
+end
+
 
 
 player.CharacterAdded:Connect(function(newChar)
@@ -439,6 +483,9 @@ local auraToggleBtn=Instance.new("TextButton"); auraToggleBtn.Text="啟動"; aur
 
 local auraHintFrame=Instance.new("Frame"); auraHintFrame.Size=UDim2.new(1,0,0,44); auraHintFrame.BackgroundColor3=Color3.fromRGB(255,243,205); auraHintFrame.LayoutOrder=3; auraHintFrame.Parent=page4; Instance.new("UICorner",auraHintFrame).CornerRadius=UDim.new(0,6)
 local auraHintLabel=Instance.new("TextLabel"); auraHintLabel.Size=UDim2.new(1,-12,1,0); auraHintLabel.Position=UDim2.new(0,6,0,0); auraHintLabel.BackgroundTransparency=1; auraHintLabel.Text="💡 開啟後先手動打一個人\n讓系統偵測到事件再自動循環"; auraHintLabel.TextSize=11; auraHintLabel.Font=Enum.Font.Gotham; auraHintLabel.TextColor3=Color3.fromRGB(120,80,0); auraHintLabel.TextWrapped=true; auraHintLabel.TextXAlignment=Enum.TextXAlignment.Left; auraHintLabel.Parent=auraHintFrame
+
+-- 面對中央 UI
+local faceCenter_Frame,faceCenter_Status,faceCenter_Btn = createControlRow(page4,"面對中央:","","",false,4)
 
 local statusLabel=Instance.new("TextLabel")
 statusLabel.Size=UDim2.new(0.9,0,0,26); statusLabel.Position=UDim2.new(0.05,0,1,-32)
@@ -715,6 +762,16 @@ auraToggleBtn.MouseButton1Click:Connect(function()
     updateStatus()
 end)
 
+-- 面對中央按鈕邏輯
+faceCenter_Btn.MouseButton1Click:Connect(function()
+    faceCenterEnabled = not faceCenterEnabled
+    faceCenter_Status.Text = faceCenterEnabled and "開啟" or "關閉"
+    faceCenter_Status.TextColor3 = faceCenterEnabled and Color3.fromRGB(46,125,50) or Color3.fromRGB(150,150,150)
+    faceCenter_Btn.Text = faceCenterEnabled and "解除" or "啟動"
+    faceCenter_Btn.BackgroundColor3 = faceCenterEnabled and Color3.fromRGB(244,67,54) or Color3.fromRGB(76,175,80)
+    faceCenter_Frame.BackgroundColor3 = faceCenterEnabled and Color3.fromRGB(227,242,253) or Color3.fromRGB(248,249,250)
+end)
+
 -- 拖曳
 local function enableDrag(frame, dragHandle)
     local dragging=false; local dragInput,dragStart,startPos
@@ -741,8 +798,6 @@ minimizeButton.MouseButton1Click:Connect(function() mainFrame.Visible=false; min
 expandButton.MouseButton1Click:Connect(function() miniFrame.Visible=false; mainFrame.Visible=true end)
 
 closeButton.MouseButton1Click:Connect(function()
-    if auraLoop then task.cancel(auraLoop) end
-    if auraTouchConn then auraTouchConn:Disconnect() end
     screenGui:Destroy()
     for _, v in pairs(connections) do if v then v:Disconnect() end end
     Lighting.Ambient=trueLightingBackup.Ambient; Lighting.Brightness=trueLightingBackup.Brightness
@@ -761,3 +816,331 @@ closeButton.MouseButton1Click:Connect(function()
 end)
 
 task.spawn(function() if player.Character then task.wait(0.1); getOriginalValues() end end)
+
+
+-- ══════════════════════════════════════════
+-- ShiftLock + ESP + 朝向中央
+-- ══════════════════════════════════════════
+task.spawn(function() pcall(function()
+    local ref = cloneref or function(x) return x end
+    local S = function(n) return ref(game:GetService(n)) end
+    local Plrs, Tw, UIS, RS, Wk, CG =
+        S("Players"), S("TweenService"), S("UserInputService"), S("RunService"), S("Workspace"), S("CoreGui")
+    local plr = Plrs.LocalPlayer
+
+    if CG:FindFirstChild("ShiftLockUI") then CG.ShiftLockUI:Destroy() end
+    local pg = plr:FindFirstChild("PlayerGui")
+    if pg and pg:FindFirstChild("ShiftLockUI") then pg.ShiftLockUI:Destroy() end
+
+    local function parentUI(g)
+        if gethui then g.Name = "\0" .. g.Name; g.Parent = gethui()
+        elseif CG then g.Parent = CG
+        else g.Parent = plr:WaitForChild("PlayerGui") end
+        return g
+    end
+
+    local function getParts()
+        local c = plr.Character or plr.CharacterAdded:Wait()
+        local hum = c:FindFirstChildOfClass("Humanoid") or c:WaitForChild("Humanoid")
+        local hrp = c:FindFirstChild("HumanoidRootPart") or c:WaitForChild("HumanoidRootPart")
+        return c, hum, hrp
+    end
+
+    local function lockMouse(v)
+        if UIS.MouseEnabled then
+            UIS.MouseBehavior = v and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
+        end
+    end
+
+    -- 狀態
+    local lockMode = "none"
+    local rotCon = nil
+    local targetPlayer = nil
+    local mouseClickConn = nil
+    local lastClickTime = 0
+    local lastClickedPlayer = nil
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ShiftLockUI"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true
+    parentUI(gui)
+
+    local btn, nearBtn, clickBtn, espBtn, centerBtn, strk, icn
+
+    local function updateButtonState(button, active)
+        Tw:Create(button, TweenInfo.new(0.2), {
+            BackgroundColor3 = active and Color3.fromRGB(50,100,150) or Color3.fromRGB(40,40,45)
+        }):Play()
+        local stroke = button:FindFirstChild("BtnStroke")
+        if stroke then
+            Tw:Create(stroke, TweenInfo.new(0.2), {
+                Color = active and Color3.fromRGB(0,200,255) or Color3.fromRGB(80,80,90),
+                Thickness = active and 2 or 1
+            }):Play()
+        end
+    end
+
+    local function clearAllModes()
+        if rotCon then rotCon:Disconnect(); rotCon = nil end
+        if mouseClickConn then mouseClickConn:Disconnect(); mouseClickConn = nil end
+        lockMouse(false)
+        local _, h, _ = getParts()
+        if h then h.AutoRotate = true end
+        icn.Image = "rbxasset://textures/ui/mouseLock_off.png"
+        Tw:Create(strk, TweenInfo.new(0.2), {Color = Color3.fromRGB(0,140,255), Thickness = 2}):Play()
+        Tw:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(34,34,38)}):Play()
+        updateButtonState(nearBtn, false)
+        updateButtonState(clickBtn, false)
+        updateButtonState(centerBtn, false)
+        lockMode = "none"
+        targetPlayer = nil
+        lastClickedPlayer = nil
+    end
+
+    local function setFaceRotation(type, target)
+        if rotCon then rotCon:Disconnect() end
+        local _, h, _ = getParts()
+        h.AutoRotate = false
+        rotCon = RS.RenderStepped:Connect(function()
+            local _, _, myHRP = getParts()
+            if not myHRP then return end
+            local lookAtPos = nil
+            if type == "nearest" then
+                local nearest, minDist = nil, math.huge
+                for _, p in ipairs(Plrs:GetPlayers()) do
+                    if p ~= plr and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+                        local pRoot = p.Character.HumanoidRootPart
+                        local d = (myHRP.Position - pRoot.Position).Magnitude
+                        if d < minDist then minDist = d; nearest = pRoot end
+                    end
+                end
+                if nearest then lookAtPos = nearest.Position end
+            elseif type == "click" and target and target.Character then
+                local pRoot = target.Character:FindFirstChild("HumanoidRootPart")
+                if pRoot then lookAtPos = pRoot.Position end
+            elseif type == "shiftlock" then
+                local cam = Wk.CurrentCamera
+                if cam then
+                    local lv = cam.CFrame.LookVector
+                    lookAtPos = myHRP.Position + Vector3.new(lv.X, 0, lv.Z)
+                end
+            elseif type == "center" then
+                -- 朝向 (0,0,0)，只左右不影響前後上下
+                lookAtPos = Vector3.new(0, myHRP.Position.Y, 0)
+            end
+            if lookAtPos then
+                local flatDir = (lookAtPos - myHRP.Position) * Vector3.new(1, 0, 1)
+                if flatDir.Magnitude > 0.001 then
+                    myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + flatDir.Unit, Vector3.yAxis)
+                end
+            end
+        end)
+    end
+
+    -- UI
+    btn = Instance.new("ImageButton")
+    btn.Name = "LockBtn"; btn.AnchorPoint = Vector2.new(0.5,0.5); btn.Size = UDim2.fromOffset(64,64)
+    btn.Position = UDim2.new(1,-30,1,-30); btn.BackgroundColor3 = Color3.fromRGB(34,34,38)
+    btn.AutoButtonColor = false; btn.Parent = gui
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1,0)
+    strk = Instance.new("UIStroke"); strk.Thickness=2; strk.Color=Color3.fromRGB(0,140,255); strk.Parent=btn
+    icn = Instance.new("ImageLabel")
+    icn.Name="Icn"; icn.BackgroundTransparency=1; icn.AnchorPoint=Vector2.new(0.5,0.5)
+    icn.Position=UDim2.fromScale(0.5,0.5); icn.Size=UDim2.fromScale(0.62,0.62)
+    icn.Image="rbxasset://textures/ui/mouseLock_off.png"; icn.Parent=btn
+
+    local dragHandle = Instance.new("Frame")
+    dragHandle.Name="DragHandle"; dragHandle.AnchorPoint=Vector2.new(0.5,1)
+    dragHandle.Position=UDim2.new(0.5,0,0,-2); dragHandle.Size=UDim2.fromOffset(40,6)
+    dragHandle.BackgroundColor3=Color3.fromRGB(100,100,110); dragHandle.BorderSizePixel=0; dragHandle.Parent=btn
+    Instance.new("UICorner", dragHandle).CornerRadius=UDim.new(1,0)
+    for _, xp in ipairs({0.3, 0.5, 0.7}) do
+        local d=Instance.new("Frame"); d.Size=UDim2.fromOffset(2,2); d.Position=UDim2.new(xp,0,0.5,-1)
+        d.BackgroundColor3=Color3.fromRGB(200,200,200); d.BorderSizePixel=0; d.Parent=dragHandle
+        Instance.new("UICorner",d).CornerRadius=UDim.new(1,0)
+    end
+
+    local xBtn = Instance.new("TextButton")
+    xBtn.Name="Close"; xBtn.AnchorPoint=Vector2.new(1,0); xBtn.Position=UDim2.new(1,5,0,-5)
+    xBtn.Size=UDim2.fromOffset(18,18); xBtn.BackgroundColor3=Color3.fromRGB(230,60,60); xBtn.Text="×"
+    xBtn.TextSize=14; xBtn.TextColor3=Color3.new(1,1,1); xBtn.Parent=btn
+    Instance.new("UICorner", xBtn)
+
+    local extBtn = Instance.new("TextButton")
+    extBtn.Name="ExtendBtn"; extBtn.AnchorPoint=Vector2.new(0.5,1); extBtn.Position=UDim2.new(0.5,0,0,-15)
+    extBtn.Size=UDim2.fromOffset(56,22); extBtn.BackgroundColor3=Color3.fromRGB(45,45,50)
+    extBtn.Text="延伸"; extBtn.TextSize=12; extBtn.TextColor3=Color3.new(1,1,1); extBtn.Parent=btn
+    Instance.new("UICorner", extBtn)
+
+    local extFrame = Instance.new("Frame")
+    extFrame.Name="ExtFrame"; extFrame.AnchorPoint=Vector2.new(0.5,1); extFrame.Position=UDim2.new(0.5,0,0,-42)
+    extFrame.Size=UDim2.fromOffset(64,0); extFrame.BackgroundTransparency=1
+    extFrame.ClipsDescendants=true; extFrame.Parent=btn
+
+    local function createExtraBtn(name, yPos)
+        local b = Instance.new("TextButton")
+        b.Name=name; b.Size=UDim2.fromOffset(60,26); b.Position=UDim2.fromOffset(2,yPos)
+        b.BackgroundColor3=Color3.fromRGB(40,40,45); b.Text=name; b.TextSize=11
+        b.TextColor3=Color3.new(1,1,1); b.Parent=extFrame
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0.2,0)
+        local s=Instance.new("UIStroke"); s.Thickness=1; s.Color=Color3.fromRGB(80,80,90)
+        s.Name="BtnStroke"; s.Parent=b
+        return b
+    end
+
+    -- 四個延伸按鈕（ESP在最上，下面三個是互斥的朝向模式）
+    espBtn    = createExtraBtn("ESP",       0)
+    nearBtn   = createExtraBtn("面向最近玩家", 30)
+    clickBtn  = createExtraBtn("面向雙擊玩家", 60)
+    centerBtn = createExtraBtn("朝向中央",   90)
+
+    local extended = false
+    extBtn.Activated:Connect(function()
+        extended = not extended
+        extBtn.Text = extended and "收回" or "延伸"
+        Tw:Create(extFrame, TweenInfo.new(0.3), {Size=UDim2.fromOffset(64, extended and 120 or 0)}):Play()
+    end)
+
+    btn.Activated:Connect(function()
+        if lockMode == "shiftlock" then clearAllModes()
+        else clearAllModes(); lockMode="shiftlock"; lockMouse(true); setFaceRotation("shiftlock")
+            icn.Image="rbxasset://textures/ui/mouseLock_on.png"
+            Tw:Create(btn,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(38,48,60)}):Play()
+        end
+    end)
+
+    nearBtn.Activated:Connect(function()
+        if lockMode == "nearest" then clearAllModes()
+        else clearAllModes(); lockMode="nearest"; updateButtonState(nearBtn,true); setFaceRotation("nearest") end
+    end)
+
+    clickBtn.Activated:Connect(function()
+        if lockMode == "click" then clearAllModes()
+        else
+            clearAllModes(); lockMode="click"; updateButtonState(clickBtn,true)
+            mouseClickConn = plr:GetMouse().Button1Down:Connect(function()
+                local mouse=plr:GetMouse(); local cam=Wk.CurrentCamera
+                local ray=cam:ScreenPointToRay(mouse.X,mouse.Y)
+                local foundPlayer=nil; local minDistance=math.huge
+                for _, p in ipairs(Plrs:GetPlayers()) do
+                    if p ~= plr and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+                        local hrp=p.Character.HumanoidRootPart
+                        local rayToPlayer=hrp.Position-ray.Origin
+                        local projection=rayToPlayer:Dot(ray.Direction.Unit)
+                        if projection > 0 then
+                            local closestPoint=ray.Origin+ray.Direction.Unit*projection
+                            local distance=(hrp.Position-closestPoint).Magnitude
+                            if distance < 8 and projection < minDistance then minDistance=projection; foundPlayer=p end
+                        end
+                    end
+                end
+                if foundPlayer and foundPlayer ~= plr then
+                    local now=tick()
+                    if lastClickedPlayer==foundPlayer and (now-lastClickTime) < 0.5 then
+                        targetPlayer=foundPlayer; setFaceRotation("click",foundPlayer)
+                    end
+                    lastClickedPlayer=foundPlayer; lastClickTime=now
+                end
+            end)
+        end
+    end)
+
+    -- 朝向中央按鈕（與其他朝向模式互斥）
+    centerBtn.Activated:Connect(function()
+        if lockMode == "center" then clearAllModes()
+        else clearAllModes(); lockMode="center"; updateButtonState(centerBtn,true); setFaceRotation("center") end
+    end)
+
+    -- ESP
+    local espEnabled = false
+    local espLabels = {}
+    local espBoxes = {}
+    local espConn = nil
+
+    local function cleanupESP(p)
+        if espLabels[p] then if espLabels[p].billboard then espLabels[p].billboard:Destroy() end; espLabels[p]=nil end
+        if espBoxes[p] then espBoxes[p]:Destroy(); espBoxes[p]=nil end
+    end
+
+    espBtn.Activated:Connect(function()
+        espEnabled = not espEnabled
+        updateButtonState(espBtn, espEnabled)
+        if not espEnabled then
+            if espConn then espConn:Disconnect(); espConn=nil end
+            for p in pairs(espLabels) do cleanupESP(p) end
+        else
+            espConn = RS.RenderStepped:Connect(function()
+                local _, _, myHRP = getParts()
+                for _, p in ipairs(Plrs:GetPlayers()) do
+                    if p ~= plr then
+                        local char=p.Character
+                        local hrp=char and char:FindFirstChild("HumanoidRootPart")
+                        local hum=char and char:FindFirstChildOfClass("Humanoid")
+                        if char and hrp and hum and hum.Health > 0 then
+                            if not espLabels[p] then
+                                local bg=Instance.new("BillboardGui")
+                                bg.Size=UDim2.fromOffset(200,50); bg.AlwaysOnTop=true
+                                bg.StudsOffset=Vector3.new(0,3,0); bg.Parent=gui
+                                local tl=Instance.new("TextLabel")
+                                tl.Size=UDim2.fromScale(1,1); tl.BackgroundTransparency=1
+                                tl.TextColor3=Color3.new(1,1,1); tl.TextStrokeTransparency=0.5
+                                tl.TextSize=14; tl.Font=Enum.Font.SourceSansBold; tl.Parent=bg
+                                espLabels[p]={billboard=bg,label=tl}
+                            end
+                            if not espBoxes[p] then
+                                local box=Instance.new("BoxHandleAdornment")
+                                box.Name="ESPBox"; box.AlwaysOnTop=true; box.ZIndex=1
+                                box.Transparency=0.7; box.Color3=Color3.new(1,1,1); box.Parent=gui
+                                espBoxes[p]=box
+                            end
+                            local dist=myHRP and (myHRP.Position-hrp.Position).Magnitude or 0
+                            local lab=espLabels[p]
+                            lab.billboard.Adornee=hrp
+                            lab.label.Text=string.format("名: %s\n血量: %.0f\n距離: %.1f",p.Name,hum.Health,dist)
+                            espBoxes[p].Adornee=char; espBoxes[p].Size=char:GetExtentsSize()
+                        else cleanupESP(p) end
+                    end
+                end
+                for p in pairs(espLabels) do if not Plrs:FindFirstChild(p.Name) then cleanupESP(p) end end
+            end)
+        end
+    end)
+
+    -- 拖曳
+    local dragging, dragStart, startPos
+    dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            dragging=true; dragStart=input.Position; startPos=btn.Position
+            Tw:Create(dragHandle,TweenInfo.new(0.1),{BackgroundColor3=Color3.fromRGB(150,150,160)}):Play()
+            input.Changed:Connect(function()
+                if input.UserInputState==Enum.UserInputState.End then
+                    dragging=false
+                    Tw:Create(dragHandle,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(100,100,110)}):Play()
+                end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+            local delta=input.Position-dragStart
+            btn.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+delta.X,startPos.Y.Scale,startPos.Y.Offset+delta.Y)
+        end
+    end)
+
+    xBtn.Activated:Connect(function()
+        clearAllModes()
+        if espConn then espConn:Disconnect() end
+        for p in pairs(espLabels) do cleanupESP(p) end
+        gui:Destroy()
+    end)
+
+    plr.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        if lockMode ~= "none" then setFaceRotation(lockMode, targetPlayer) end
+    end)
+
+    -- 預設啟動 ShiftLock
+    task.wait(0.1)
+    lockMode="shiftlock"; lockMouse(true); setFaceRotation("shiftlock")
+    icn.Image="rbxasset://textures/ui/mouseLock_on.png"
+    Tw:Create(btn,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(38,48,60)}):Play()
+end) end)
