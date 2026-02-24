@@ -48,7 +48,6 @@ local auraLoop = nil
 local auraDetectedEvents = {}
 local auraHookActive = false
 local auraLastFire = 0
-local faceCenterEnabled = false  -- 觸發前先面向 (0,0,0)
 
 local function getOriginalValues()
     if toggles.speed or toggles.jump or toggles.gravity then return end
@@ -127,7 +126,7 @@ local function applySpeed(char)
     if toggles.speed then
         hum.WalkSpeed=values.speed
         connections.speed=hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function() if toggles.speed then hum.WalkSpeed=values.speed end end)
-    else hum.WalkSpeed=originalSpeed end
+    else hum.WalkSpeed=20 end
 end
 
 local function applyJump(char)
@@ -219,46 +218,6 @@ local function startAuraHook()
 end
 pcall(startAuraHook)
 
--- 面向中央：只旋轉 Y 軸（左右），保留原本的 Y 座標高度和 shiftlock 狀態
-local function faceAndFire(fireFn)
-    local char = player.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not faceCenterEnabled or not hrp then
-        fireFn()
-        return
-    end
-
-    -- 記錄原本朝向
-    local originalCFrame = hrp.CFrame
-
-    -- 記錄並暫時停用 ShiftLock（透過 CameraMode）
-    local originalCameraMode = player.CameraMode
-    local wasShiftLocked = (originalCameraMode == Enum.CameraMode.LockFirstPerson)
-    if wasShiftLocked then
-        player.CameraMode = Enum.CameraMode.Classic
-    end
-
-    -- 面向 (0,0,0)：只旋轉 Y 軸，X/Z 朝向中央
-    local myPos = hrp.Position
-    local lookDir = Vector3.new(0 - myPos.X, 0, 0 - myPos.Z)
-    if lookDir.Magnitude > 0.01 then
-        hrp.CFrame = CFrame.new(myPos, myPos + lookDir)
-    end
-
-    -- 觸發事件
-    fireFn()
-
-    -- 恢復朝向和 shiftlock
-    task.defer(function()
-        if hrp and hrp.Parent then
-            hrp.CFrame = originalCFrame
-        end
-        if wasShiftLocked then
-            player.CameraMode = originalCameraMode
-        end
-    end)
-end
-
 local function fireAllAuraEvents(target)
     for _, entry in ipairs(auraDetectedEvents) do
         local newArgs = {}
@@ -294,9 +253,7 @@ RunService.Heartbeat:Connect(function()
 
     local target = getNearestInRange(values.auraRange)
     if target then
-        faceAndFire(function()
-            fireAllAuraEvents(target)
-        end)
+        fireAllAuraEvents(target)
     end
 end)
 
@@ -485,7 +442,6 @@ local auraHintFrame=Instance.new("Frame"); auraHintFrame.Size=UDim2.new(1,0,0,44
 local auraHintLabel=Instance.new("TextLabel"); auraHintLabel.Size=UDim2.new(1,-12,1,0); auraHintLabel.Position=UDim2.new(0,6,0,0); auraHintLabel.BackgroundTransparency=1; auraHintLabel.Text="💡 開啟後先手動打一個人\n讓系統偵測到事件再自動循環"; auraHintLabel.TextSize=11; auraHintLabel.Font=Enum.Font.Gotham; auraHintLabel.TextColor3=Color3.fromRGB(120,80,0); auraHintLabel.TextWrapped=true; auraHintLabel.TextXAlignment=Enum.TextXAlignment.Left; auraHintLabel.Parent=auraHintFrame
 
 -- 面對中央 UI
-local faceCenter_Frame,faceCenter_Status,faceCenter_Btn = createControlRow(page4,"面對中央:","","",false,4)
 
 local statusLabel=Instance.new("TextLabel")
 statusLabel.Size=UDim2.new(0.9,0,0,26); statusLabel.Position=UDim2.new(0.05,0,1,-32)
@@ -760,16 +716,6 @@ auraToggleBtn.MouseButton1Click:Connect(function()
         if auraTouchConn then auraTouchConn:Disconnect(); auraTouchConn=nil end
     end
     updateStatus()
-end)
-
--- 面對中央按鈕邏輯
-faceCenter_Btn.MouseButton1Click:Connect(function()
-    faceCenterEnabled = not faceCenterEnabled
-    faceCenter_Status.Text = faceCenterEnabled and "開啟" or "關閉"
-    faceCenter_Status.TextColor3 = faceCenterEnabled and Color3.fromRGB(46,125,50) or Color3.fromRGB(150,150,150)
-    faceCenter_Btn.Text = faceCenterEnabled and "解除" or "啟動"
-    faceCenter_Btn.BackgroundColor3 = faceCenterEnabled and Color3.fromRGB(244,67,54) or Color3.fromRGB(76,175,80)
-    faceCenter_Frame.BackgroundColor3 = faceCenterEnabled and Color3.fromRGB(227,242,253) or Color3.fromRGB(248,249,250)
 end)
 
 -- 拖曳
