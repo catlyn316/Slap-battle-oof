@@ -1116,4 +1116,4 @@ task.spawn(function() pcall(function()
         task.wait(0.5)
         if lockMode ~= "none" then setFaceRotation(lockMode, targetPlayer) end
     end)
-end) 
+end) end)
