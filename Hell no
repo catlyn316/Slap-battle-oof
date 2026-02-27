@@ -1,4 +1,4 @@
--- Roblox 全能控制器 (增強版 v2.5 + Slap Aura)
+-- Roblox 全能控制器 (增強版 v2.6)
 local CoreGui = game:GetService("CoreGui")
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
@@ -30,11 +30,12 @@ local toggles = {
 }
 local values = {
     speed=25, jump=75, gravity=50, fullbright=0.8,
-    cameraDist=15, brightness=2, wallTrans=0.8, floatSpeed=1, auraRange=17
+    cameraDist=125, brightness=2, wallTrans=0.8, floatSpeed=1, auraRange=17
 }
 local connections = {
     speed=nil, jump=nil, gravity=nil, fullbright=nil,
-    nofog=nil, brightness=nil, noclipWall=nil, noclip=nil, noFilter=nil
+    nofog=nil, brightness=nil, noclipWall=nil, noclip=nil, noFilter=nil,
+    fixCam=nil, camDistGuard=nil
 }
 local transparencyCache = {}
 local noclipMode = "all"
@@ -42,9 +43,13 @@ local platform = nil
 local isUpButtonPressed = false
 local isDownButtonPressed = false
 
+-- 修復鏡頭狀態
+local fixCamEnabled = false
+local fixCamZoom = 125  -- 記住啟動時的距離
+local fixCamConn = nil
+
 -- Slap Aura 狀態
 local auraEnabled = false
-local auraLoop = nil
 local auraDetectedEvents = {}
 local auraHookActive = false
 local auraLastFire = 0
@@ -164,11 +169,71 @@ local function applyNoclip(char)
 end
 
 -- ══════════════════════════════════════════
--- Slap Aura Hook（只設一次，Delta 支援）
+-- 修復鏡頭功能
+-- 針對手機/平板上遊戲 bug 導致觸控鏡頭卡住無法移動
+-- 修復方式：重置 CameraType + CameraMode，並重新連接 TouchEnabled 鏡頭
 -- ══════════════════════════════════════════
--- hook 只負責：記錄事件 + 標記「剛剛有攻擊」
--- 實際的 aura 觸發交給 RunService 循環處理，避免在 hook 環境裡 FireServer
-local auraPendingFire = false  -- 旗標：RunService 看到後觸發一次
+local function applyFixCamera()
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+
+    -- 強制重置鏡頭類型和模式
+    cam.CameraType = Enum.CameraType.Custom
+    player.CameraMode = Enum.CameraMode.Classic
+    player.CameraMinZoomDistance = 0.5
+    player.CameraMaxZoomDistance = 500
+
+    -- 清除可能導致卡住的 CameraOffset
+    local char = player.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.CameraOffset = Vector3.new(0,0,0) end
+    end
+
+    -- 手機/平板觸控鏡頭卡住修復：
+    -- 透過短暫切換 CameraType 再切回來，強制 Roblox 重新初始化觸控鏡頭控制器
+    task.delay(0.05, function()
+        if Workspace.CurrentCamera then
+            Workspace.CurrentCamera.CameraType = Enum.CameraType.Scriptable
+        end
+        task.delay(0.08, function()
+            if Workspace.CurrentCamera then
+                Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+                player.CameraMode = Enum.CameraMode.Classic
+                player.CameraMinZoomDistance = 0.5
+                player.CameraMaxZoomDistance = 500
+            end
+        end)
+    end)
+end
+
+local function startFixCamGuard()
+    if fixCamConn then fixCamConn:Disconnect() end
+    fixCamConn = RunService.Heartbeat:Connect(function()
+        if not fixCamEnabled then return end
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+        -- 偵測 CameraType 被遊戲改掉
+        if cam.CameraType ~= Enum.CameraType.Custom then
+            cam.CameraType = Enum.CameraType.Custom
+        end
+        -- 偵測 CameraMode 被遊戲強制 LockFirstPerson（不是玩家縮小）
+        if player.CameraMode == Enum.CameraMode.LockFirstPerson then
+            player.CameraMode = Enum.CameraMode.Classic
+            player.CameraMinZoomDistance = 0.5
+            player.CameraMaxZoomDistance = 500
+        end
+        -- 確保 MaxZoom 不被遊戲壓縮
+        if player.CameraMaxZoomDistance < 10 then
+            player.CameraMaxZoomDistance = 500
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════
+-- Slap Aura Hook
+-- ══════════════════════════════════════════
+local auraPendingFire = false
 
 local function startAuraHook()
     if auraHookActive then return end
@@ -176,11 +241,7 @@ local function startAuraHook()
     local origNamecall
     origNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
-
-        -- 先讓原本呼叫正常執行
         local result = origNamecall(self, ...)
-
-        -- 判斷是否為針對其他玩家的攻擊事件
         if auraEnabled and method == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
             local args = {...}
             local found = false
@@ -195,7 +256,6 @@ local function startAuraHook()
                 end
             end
             if found then
-                -- 記錄事件模板（避免重複）
                 local alreadyCaptured = false
                 for _, entry in ipairs(auraDetectedEvents) do
                     if entry.event == self then alreadyCaptured=true; break end
@@ -204,15 +264,10 @@ local function startAuraHook()
                     table.insert(auraDetectedEvents, {event=self, args=args})
                     warn("[Slap Aura] 新增事件: " .. self.Name .. " 共" .. #auraDetectedEvents .. "個")
                 end
-
-                -- 標記「剛剛攻擊了」，RunService 那邊會處理 aura 觸發
                 local now = tick()
-                if now - auraLastFire >= 1 then
-                    auraPendingFire = true
-                end
+                if now - auraLastFire >= 1 then auraPendingFire = true end
             end
         end
-
         return result
     end)
 end
@@ -256,19 +311,14 @@ local function getNearestInRange(range)
     return nearest
 end
 
--- RunService 循環：hook 攔截到攻擊 → auraPendingFire = true → 在 hook 外安全觸發
 RunService.Heartbeat:Connect(function()
     if not auraEnabled then return end
     if not auraPendingFire then return end
     if #auraDetectedEvents == 0 then auraPendingFire=false; return end
-
     auraPendingFire = false
     auraLastFire = tick()
-
     local target = getNearestInRange(values.auraRange)
-    if target then
-        fireAllAuraEvents(target)
-    end
+    if target then fireAllAuraEvents(target) end
 end)
 
 player.CharacterAdded:Connect(function(newChar)
@@ -277,6 +327,7 @@ player.CharacterAdded:Connect(function(newChar)
     if toggles.jump then applyJump(newChar) end
     if toggles.noclip then applyNoclip(newChar) end
     if toggles.platform then if platform then platform:Destroy() end end
+    if fixCamEnabled then task.wait(0.5); applyFixCamera() end
 end)
 
 -- ====================
@@ -315,7 +366,7 @@ Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -60, 1, 0)
 title.BackgroundTransparency = 1
-title.Text = "🎮 貓玲的全能控制器 v2.5"
+title.Text = "🎮 貓玲的全能控制器 v2.6"
 title.TextSize = 14
 title.Font = Enum.Font.GothamBold
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -333,7 +384,7 @@ closeButton.BackgroundColor3=Color3.fromRGB(244,67,54); closeButton.Text="X"
 closeButton.TextColor3=Color3.fromRGB(255,255,255); closeButton.Parent=titleBar
 Instance.new("UICorner", closeButton).CornerRadius=UDim.new(0,5)
 
--- 分頁列（4個分頁：基礎移動、視野燈光、穿牆飄浮、Slap Aura）
+-- 分頁列
 local tabBar = Instance.new("Frame")
 tabBar.Size=UDim2.new(0.9,0,0,28); tabBar.Position=UDim2.new(0.05,0,0,38)
 tabBar.BackgroundColor3=Color3.fromRGB(240,240,240); tabBar.Parent=mainFrame
@@ -401,18 +452,25 @@ local function createControlRow(parent, labelText, placeholder, defaultVal, isIn
     return frame, input, btn
 end
 
--- 頁面1：基礎移動（無限跳已移除）
+-- 頁面1：基礎移動
 local speedFrame,speedInput,speedButton=createControlRow(page1,"速度:","25","25",true,1)
 local jumpFrame,jumpInput,jumpButton=createControlRow(page1,"跳躍:","75","75",true,2)
 local gravFrame,gravInput,gravButton=createControlRow(page1,"重力:","50","50",true,3)
 
--- 頁面2：視野燈光
+-- 頁面2：視野燈光（鏡頭距離預設125，修復鏡頭排在鏡頭距離後面 order=3，原本的往後推）
 local fullbrightFrame,fullbrightInput,fullbrightButton=createControlRow(page2,"全亮:","0.8","0.8",true,1)
-local cameraDistFrame,cameraDistInput,cameraDistButton=createControlRow(page2,"鏡頭距離:","80","80",true,2)
-local nofogFrame,nofogStatus,nofogButton=createControlRow(page2,"除霧:","","",false,3)
-local noFilterFrame,noFilterStatus,noFilterButton=createControlRow(page2,"無濾鏡:","","",false,4)
-local noclipWallFrame,noclipWallInput,noclipWallButton=createControlRow(page2,"穿牆鏡頭:","0.8","0.8",true,5)
-local brightnessFrame,brightnessInput,brightnessButton=createControlRow(page2,"燈光:","2","2",true,6)
+local cameraDistFrame,cameraDistInput,cameraDistButton=createControlRow(page2,"鏡頭距離:","125","125",true,2)
+
+-- 修復鏡頭列（按鈕文字固定「修復」，按下執行一次，不做開關）
+local fixCamFrame=Instance.new("Frame"); fixCamFrame.Size=UDim2.new(1,0,0,32); fixCamFrame.BackgroundColor3=Color3.fromRGB(248,249,250); fixCamFrame.LayoutOrder=3; fixCamFrame.Parent=page2; Instance.new("UICorner",fixCamFrame).CornerRadius=UDim.new(0,6)
+local fixCamLabel=Instance.new("TextLabel"); fixCamLabel.Size=UDim2.new(0,95,1,0); fixCamLabel.Position=UDim2.new(0,6,0,0); fixCamLabel.BackgroundTransparency=1; fixCamLabel.Text="修復鏡頭:"; fixCamLabel.TextSize=12; fixCamLabel.Font=Enum.Font.GothamBold; fixCamLabel.TextColor3=Color3.fromRGB(85,85,85); fixCamLabel.TextXAlignment=Enum.TextXAlignment.Left; fixCamLabel.Parent=fixCamFrame
+local fixCamStatusText=Instance.new("TextLabel"); fixCamStatusText.Size=UDim2.new(0,55,0,22); fixCamStatusText.Position=UDim2.new(0,100,0,5); fixCamStatusText.BackgroundTransparency=1; fixCamStatusText.Text="待機"; fixCamStatusText.TextSize=12; fixCamStatusText.Font=Enum.Font.Gotham; fixCamStatusText.TextColor3=Color3.fromRGB(150,150,150); fixCamStatusText.Parent=fixCamFrame
+local fixCamButton=Instance.new("TextButton"); fixCamButton.Size=UDim2.new(0,50,0,22); fixCamButton.Position=UDim2.new(1,-55,0,5); fixCamButton.BackgroundColor3=Color3.fromRGB(33,150,243); fixCamButton.Text="修復"; fixCamButton.TextSize=12; fixCamButton.Font=Enum.Font.GothamBold; fixCamButton.TextColor3=Color3.fromRGB(255,255,255); fixCamButton.Parent=fixCamFrame; Instance.new("UICorner",fixCamButton).CornerRadius=UDim.new(0,5)
+
+local nofogFrame,nofogStatus,nofogButton=createControlRow(page2,"除霧:","","",false,4)
+local noFilterFrame,noFilterStatus,noFilterButton=createControlRow(page2,"無濾鏡:","","",false,5)
+local noclipWallFrame,noclipWallInput,noclipWallButton=createControlRow(page2,"穿牆鏡頭:","0.8","0.8",true,6)
+local brightnessFrame,brightnessInput,brightnessButton=createControlRow(page2,"燈光:","2","2",true,7)
 
 -- 頁面3：穿牆飄浮
 local noclipMainFrame=Instance.new("Frame"); noclipMainFrame.Size=UDim2.new(1,0,0,32); noclipMainFrame.BackgroundColor3=Color3.fromRGB(248,249,250); noclipMainFrame.LayoutOrder=1; noclipMainFrame.Parent=page3; Instance.new("UICorner",noclipMainFrame).CornerRadius=UDim.new(0,6)
@@ -439,8 +497,6 @@ local auraToggleBtn=Instance.new("TextButton"); auraToggleBtn.Text="啟動"; aur
 local auraHintFrame=Instance.new("Frame"); auraHintFrame.Size=UDim2.new(1,0,0,44); auraHintFrame.BackgroundColor3=Color3.fromRGB(255,243,205); auraHintFrame.LayoutOrder=3; auraHintFrame.Parent=page4; Instance.new("UICorner",auraHintFrame).CornerRadius=UDim.new(0,6)
 local auraHintLabel=Instance.new("TextLabel"); auraHintLabel.Size=UDim2.new(1,-12,1,0); auraHintLabel.Position=UDim2.new(0,6,0,0); auraHintLabel.BackgroundTransparency=1; auraHintLabel.Text="💡 開啟後先手動打一個人\n讓系統偵測到事件再自動循環"; auraHintLabel.TextSize=11; auraHintLabel.Font=Enum.Font.Gotham; auraHintLabel.TextColor3=Color3.fromRGB(120,80,0); auraHintLabel.TextWrapped=true; auraHintLabel.TextXAlignment=Enum.TextXAlignment.Left; auraHintLabel.Parent=auraHintFrame
 
--- 面對中央 UI
-
 local statusLabel=Instance.new("TextLabel")
 statusLabel.Size=UDim2.new(0.9,0,0,26); statusLabel.Position=UDim2.new(0.05,0,1,-32)
 statusLabel.BackgroundColor3=Color3.fromRGB(255,235,238); statusLabel.Text="系統未啟動"
@@ -458,6 +514,7 @@ local function updateStatus()
     if toggles.noclip then table.insert(active,"穿牆") end
     if toggles.noFilter then table.insert(active,"無濾鏡") end
     if auraEnabled then table.insert(active,"Aura") end
+    if fixCamEnabled then table.insert(active,"修復鏡頭") end
     if #active > 0 then
         statusLabel.Text="✅ "..table.concat(active," | ")
         statusLabel.BackgroundColor3=Color3.fromRGB(232,245,233); statusLabel.TextColor3=Color3.fromRGB(46,125,50)
@@ -520,6 +577,27 @@ brightnessButton.MouseButton1Click:Connect(function()
     updateLighting(); toggleUIState(brightnessButton,brightnessFrame,brightnessInput,toggles.brightness)
 end)
 
+-- 修復鏡頭按鈕（按一次執行功能，按鈕文字永遠保持「修復」）
+fixCamButton.MouseButton1Click:Connect(function()
+    -- 執行修復（不做開關，每次按都重新修復一次）
+    fixCamEnabled = true
+    applyFixCamera()
+    if not fixCamConn then startFixCamGuard() end
+    -- 短暫閃爍回饋
+    fixCamButton.BackgroundColor3 = Color3.fromRGB(46,125,50)
+    fixCamStatusText.Text = "已修復"
+    fixCamStatusText.TextColor3 = Color3.fromRGB(46,125,50)
+    fixCamFrame.BackgroundColor3 = Color3.fromRGB(232,245,233)
+    task.delay(1.5, function()
+        if fixCamButton and fixCamButton.Parent then
+            fixCamButton.BackgroundColor3 = Color3.fromRGB(33,150,243)
+            fixCamStatusText.Text = "守護中"
+            fixCamStatusText.TextColor3 = Color3.fromRGB(33,150,243)
+        end
+    end)
+    updateStatus()
+end)
+
 noFilterButton.MouseButton1Click:Connect(function()
     toggles.noFilter=not toggles.noFilter
     if toggles.noFilter then
@@ -576,12 +654,29 @@ end)
 cameraDistButton.MouseButton1Click:Connect(function()
     toggles.cameraDist=not toggles.cameraDist
     if toggles.cameraDist then
-        values.cameraDist=tonumber(cameraDistInput.Text) or 15
+        values.cameraDist=tonumber(cameraDistInput.Text) or 125
         player.CameraMaxZoomDistance=values.cameraDist; player.CameraMinZoomDistance=values.cameraDist
         if player.Character then local hum=player.Character:FindFirstChildOfClass("Humanoid"); if hum then hum.CameraOffset=Vector3.new(0,0,0) end end
         task.delay(0.1,function() if toggles.cameraDist then player.CameraMinZoomDistance=0.5 end end)
+        -- 啟動第一人稱守護（只防遊戲強制，不防玩家自己縮小）
+        if connections.camDistGuard then connections.camDistGuard:Disconnect() end
+        local lastGameForcedCheck = tick()
+        connections.camDistGuard = RunService.Heartbeat:Connect(function()
+            if not toggles.cameraDist then
+                if connections.camDistGuard then connections.camDistGuard:Disconnect(); connections.camDistGuard=nil end
+                return
+            end
+            -- 只在 CameraMode 被遊戲強制設成 LockFirstPerson 時才介入
+            -- 玩家自己把鏡頭滾輪縮到 0 不會觸發 LockFirstPerson，所以這裡是安全的
+            if player.CameraMode == Enum.CameraMode.LockFirstPerson then
+                player.CameraMode = Enum.CameraMode.Classic
+                player.CameraMinZoomDistance = 0.5
+                player.CameraMaxZoomDistance = values.cameraDist
+            end
+        end)
     else
         player.CameraMaxZoomDistance=128; player.CameraMinZoomDistance=0.5
+        if connections.camDistGuard then connections.camDistGuard:Disconnect(); connections.camDistGuard=nil end
     end
     toggleUIState(cameraDistButton,cameraDistFrame,cameraDistInput,toggles.cameraDist)
 end)
@@ -693,15 +788,12 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- Slap Aura 開關
-
--- 監聽工具 Activated（平板點擊攻擊時觸發）
 local auraActivatedConn = nil
 
 local function setupAuraActivated()
     if auraActivatedConn then auraActivatedConn:Disconnect(); auraActivatedConn=nil end
     local char = player.Character
     if not char then return end
-    -- 找當前裝備的工具
     local tool = char:FindFirstChildOfClass("Tool")
     if not tool then return end
     auraActivatedConn = tool.Activated:Connect(function()
@@ -712,7 +804,6 @@ local function setupAuraActivated()
     end)
 end
 
--- 角色重生或換工具時重新綁定
 player.CharacterAdded:Connect(function(newChar)
     task.wait(0.5)
     if auraEnabled then setupAuraActivated() end
@@ -751,10 +842,13 @@ auraToggleBtn.MouseButton1Click:Connect(function()
     updateStatus()
 end)
 
--- 拖曳
+-- 拖曳（加入 sinkInput 防止拖曳時移動鏡頭）
 local function enableDrag(frame, dragHandle)
     local dragging=false; local dragInput,dragStart,startPos
-    local function update(input) local delta=input.Position-dragStart; frame.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+delta.X,startPos.Y.Scale,startPos.Y.Offset+delta.Y) end
+    local function update(input)
+        local delta=input.Position-dragStart
+        frame.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+delta.X,startPos.Y.Scale,startPos.Y.Offset+delta.Y)
+    end
     dragHandle.InputBegan:Connect(function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
             dragging=true; dragStart=input.Position; startPos=frame.Position
@@ -779,6 +873,7 @@ expandButton.MouseButton1Click:Connect(function() miniFrame.Visible=false; mainF
 closeButton.MouseButton1Click:Connect(function()
     screenGui:Destroy()
     for _, v in pairs(connections) do if v then v:Disconnect() end end
+    if fixCamConn then fixCamConn:Disconnect() end
     Lighting.Ambient=trueLightingBackup.Ambient; Lighting.Brightness=trueLightingBackup.Brightness
     Lighting.OutdoorAmbient=trueLightingBackup.OutdoorAmbient
     Lighting.ColorShift_Top=trueLightingBackup.ColorShift_Top; Lighting.ColorShift_Bottom=trueLightingBackup.ColorShift_Bottom
@@ -786,6 +881,8 @@ closeButton.MouseButton1Click:Connect(function()
     for effect,backup in pairs(postEffectBackups) do if effect and effect.Parent then for prop,value in pairs(backup) do pcall(function() effect[prop]=value end) end end end
     for atm,backup in pairs(atmosphereBackups) do if atm and atm.Parent then for prop,value in pairs(backup) do pcall(function() atm[prop]=value end) end end end
     if platform then platform:Destroy() end
+    player.CameraMinZoomDistance=0.5; player.CameraMaxZoomDistance=128
+    player.CameraMode=Enum.CameraMode.Classic
     local char=player.Character
     if char then
         local hum=char:FindFirstChildOfClass("Humanoid")
@@ -798,7 +895,8 @@ task.spawn(function() if player.Character then task.wait(0.1); getOriginalValues
 
 
 -- ══════════════════════════════════════════
--- ShiftLock + ESP + 朝向中央
+-- ESP + 面向玩家功能（ShiftLock 已移除）
+-- 面向/ESP 浮動面板支援拖曳，且拖曳時不影響鏡頭
 -- ══════════════════════════════════════════
 task.spawn(function() pcall(function()
     local ref = cloneref or function(x) return x end
@@ -825,13 +923,6 @@ task.spawn(function() pcall(function()
         return c, hum, hrp
     end
 
-    local function lockMouse(v)
-        if UIS.MouseEnabled then
-            UIS.MouseBehavior = v and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
-        end
-    end
-
-    -- 狀態
     local lockMode = "none"
     local rotCon = nil
     local targetPlayer = nil
@@ -843,7 +934,7 @@ task.spawn(function() pcall(function()
     gui.Name = "ShiftLockUI"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true
     parentUI(gui)
 
-    local btn, nearBtn, clickBtn, espBtn, centerBtn, strk, icn
+    local nearBtn, clickBtn, espBtn, centerBtn
 
     local function updateButtonState(button, active)
         Tw:Create(button, TweenInfo.new(0.2), {
@@ -861,12 +952,8 @@ task.spawn(function() pcall(function()
     local function clearAllModes()
         if rotCon then rotCon:Disconnect(); rotCon = nil end
         if mouseClickConn then mouseClickConn:Disconnect(); mouseClickConn = nil end
-        lockMouse(false)
         local _, h, _ = getParts()
         if h then h.AutoRotate = true end
-        icn.Image = "rbxasset://textures/ui/mouseLock_off.png"
-        Tw:Create(strk, TweenInfo.new(0.2), {Color = Color3.fromRGB(0,140,255), Thickness = 2}):Play()
-        Tw:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(34,34,38)}):Play()
         updateButtonState(nearBtn, false)
         updateButtonState(clickBtn, false)
         updateButtonState(centerBtn, false)
@@ -896,14 +983,7 @@ task.spawn(function() pcall(function()
             elseif type == "click" and target and target.Character then
                 local pRoot = target.Character:FindFirstChild("HumanoidRootPart")
                 if pRoot then lookAtPos = pRoot.Position end
-            elseif type == "shiftlock" then
-                local cam = Wk.CurrentCamera
-                if cam then
-                    local lv = cam.CFrame.LookVector
-                    lookAtPos = myHRP.Position + Vector3.new(lv.X, 0, lv.Z)
-                end
             elseif type == "center" then
-                -- 朝向 (0,0,0)，只左右不影響前後上下
                 lookAtPos = Vector3.new(0, myHRP.Position.Y, 0)
             end
             if lookAtPos then
@@ -915,84 +995,160 @@ task.spawn(function() pcall(function()
         end)
     end
 
-    -- UI
-    btn = Instance.new("ImageButton")
-    btn.Name = "LockBtn"; btn.AnchorPoint = Vector2.new(0.5,0.5); btn.Size = UDim2.fromOffset(64,64)
-    btn.Position = UDim2.new(1,-30,1,-30); btn.BackgroundColor3 = Color3.fromRGB(34,34,38)
-    btn.AutoButtonColor = false; btn.Parent = gui
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(1,0)
-    strk = Instance.new("UIStroke"); strk.Thickness=2; strk.Color=Color3.fromRGB(0,140,255); strk.Parent=btn
-    icn = Instance.new("ImageLabel")
-    icn.Name="Icn"; icn.BackgroundTransparency=1; icn.AnchorPoint=Vector2.new(0.5,0.5)
-    icn.Position=UDim2.fromScale(0.5,0.5); icn.Size=UDim2.fromScale(0.62,0.62)
-    icn.Image="rbxasset://textures/ui/mouseLock_off.png"; icn.Parent=btn
+    -- ══════════════════════════
+    -- 面向/ESP 浮動面板 UI
+    -- panel 錨點右下，toggleBtn 固定在底，btnContainer 緊貼 toggleBtn 正上方往上展開
+    -- ══════════════════════════
+    local panelWidth = 80
+    local btnH = 30
+    local btnGap = 3
+    local numBtns = 4
+    local expandedH = numBtns * btnH + (numBtns - 1) * btnGap
+    local toggleBtnH = 28
 
-    local dragHandle = Instance.new("Frame")
-    dragHandle.Name="DragHandle"; dragHandle.AnchorPoint=Vector2.new(0.5,1)
-    dragHandle.Position=UDim2.new(0.5,0,0,-2); dragHandle.Size=UDim2.fromOffset(40,6)
-    dragHandle.BackgroundColor3=Color3.fromRGB(100,100,110); dragHandle.BorderSizePixel=0; dragHandle.Parent=btn
-    Instance.new("UICorner", dragHandle).CornerRadius=UDim.new(1,0)
-    for _, xp in ipairs({0.3, 0.5, 0.7}) do
-        local d=Instance.new("Frame"); d.Size=UDim2.fromOffset(2,2); d.Position=UDim2.new(xp,0,0.5,-1)
-        d.BackgroundColor3=Color3.fromRGB(200,200,200); d.BorderSizePixel=0; d.Parent=dragHandle
-        Instance.new("UICorner",d).CornerRadius=UDim.new(1,0)
-    end
+    -- 外層容器，AnchorPoint 右下角，panel 高度隨展開變化
+    local panel = Instance.new("Frame")
+    panel.Name = "AnchorPanel"
+    panel.AnchorPoint = Vector2.new(1, 1)
+    panel.Size = UDim2.fromOffset(panelWidth, toggleBtnH)
+    panel.Position = UDim2.new(1, -36, 1, -50)
+    panel.BackgroundTransparency = 1
+    panel.ClipsDescendants = false
+    panel.Parent = gui
 
+    -- 主切換按鈕（固定在 panel 底部，AnchorPoint 左下）
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.AnchorPoint = Vector2.new(0, 1)
+    toggleBtn.Size = UDim2.fromOffset(panelWidth, toggleBtnH)
+    toggleBtn.Position = UDim2.new(0, 0, 1, 0)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(45,45,55)
+    toggleBtn.Text = "面向/ESP ▲"
+    toggleBtn.TextSize = 11
+    toggleBtn.Font = Enum.Font.GothamBold
+    toggleBtn.TextColor3 = Color3.fromRGB(200,200,220)
+    toggleBtn.AutoButtonColor = false
+    toggleBtn.Parent = panel
+    Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0,6)
+
+    -- 關閉按鈕（x，圓角正方形，貼在主按鈕右側同高）
     local xBtn = Instance.new("TextButton")
-    xBtn.Name="Close"; xBtn.AnchorPoint=Vector2.new(1,0); xBtn.Position=UDim2.new(1,5,0,-5)
-    xBtn.Size=UDim2.fromOffset(18,18); xBtn.BackgroundColor3=Color3.fromRGB(230,60,60); xBtn.Text="×"
-    xBtn.TextSize=14; xBtn.TextColor3=Color3.new(1,1,1); xBtn.Parent=btn
-    Instance.new("UICorner", xBtn)
+    xBtn.Size = UDim2.fromOffset(22, 22)
+    xBtn.AnchorPoint = Vector2.new(0, 1)
+    xBtn.Position = UDim2.new(1, 4, 1, -3)
+    xBtn.BackgroundColor3 = Color3.fromRGB(200,50,50)
+    xBtn.Text = "x"
+    xBtn.TextSize = 13
+    xBtn.Font = Enum.Font.GothamBold
+    xBtn.TextColor3 = Color3.new(1,1,1)
+    xBtn.AutoButtonColor = false
+    xBtn.Parent = panel
+    Instance.new("UICorner", xBtn).CornerRadius = UDim.new(0,5)
 
-    local extBtn = Instance.new("TextButton")
-    extBtn.Name="ExtendBtn"; extBtn.AnchorPoint=Vector2.new(0.5,1); extBtn.Position=UDim2.new(0.5,0,0,-15)
-    extBtn.Size=UDim2.fromOffset(56,22); extBtn.BackgroundColor3=Color3.fromRGB(45,45,50)
-    extBtn.Text="延伸"; extBtn.TextSize=12; extBtn.TextColor3=Color3.new(1,1,1); extBtn.Parent=btn
-    Instance.new("UICorner", extBtn)
+    -- 功能按鈕容器（緊貼 toggleBtn 正上方，ClipsDescendants 做展開動畫）
+    local btnContainer = Instance.new("Frame")
+    btnContainer.AnchorPoint = Vector2.new(0, 1)
+    btnContainer.Size = UDim2.fromOffset(panelWidth, 0)
+    btnContainer.Position = UDim2.new(0, 0, 1, -toggleBtnH)
+    btnContainer.BackgroundTransparency = 1
+    btnContainer.ClipsDescendants = true
+    btnContainer.Parent = panel
 
-    local extFrame = Instance.new("Frame")
-    extFrame.Name="ExtFrame"; extFrame.AnchorPoint=Vector2.new(0.5,1); extFrame.Position=UDim2.new(0.5,0,0,-42)
-    extFrame.Size=UDim2.fromOffset(64,0); extFrame.BackgroundTransparency=1
-    extFrame.ClipsDescendants=true; extFrame.Parent=btn
-
-    local function createExtraBtn(name, yPos)
+    local function createExtraBtn(name, idx)
         local b = Instance.new("TextButton")
-        b.Name=name; b.Size=UDim2.fromOffset(60,26); b.Position=UDim2.fromOffset(2,yPos)
-        b.BackgroundColor3=Color3.fromRGB(40,40,45); b.Text=name; b.TextSize=11
-        b.TextColor3=Color3.new(1,1,1); b.Parent=extFrame
-        Instance.new("UICorner",b).CornerRadius=UDim.new(0.2,0)
-        local s=Instance.new("UIStroke"); s.Thickness=1; s.Color=Color3.fromRGB(80,80,90)
-        s.Name="BtnStroke"; s.Parent=b
+        b.Name = name
+        b.Size = UDim2.fromOffset(panelWidth, btnH)
+        b.Position = UDim2.fromOffset(0, (idx-1)*(btnH+btnGap))
+        b.BackgroundColor3 = Color3.fromRGB(38,38,48)
+        b.Text = name
+        b.TextSize = 11
+        b.TextColor3 = Color3.new(1,1,1)
+        b.AutoButtonColor = false
+        b.Parent = btnContainer
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0,6)
+        local s = Instance.new("UIStroke"); s.Thickness=1; s.Color=Color3.fromRGB(70,70,85); s.Name="BtnStroke"; s.Parent=b
         return b
     end
 
-    -- 四個延伸按鈕（ESP在最上，下面三個是互斥的朝向模式）
-    espBtn    = createExtraBtn("ESP",       0)
-    nearBtn   = createExtraBtn("面向最近玩家", 30)
-    clickBtn  = createExtraBtn("面向雙擊玩家", 60)
-    centerBtn = createExtraBtn("朝向中央",   90)
+    espBtn    = createExtraBtn("ESP",     1)
+    nearBtn   = createExtraBtn("面向最近", 2)
+    clickBtn  = createExtraBtn("面向雙擊", 3)
+    centerBtn = createExtraBtn("朝向中央", 4)
 
-    local extended = false
-    extBtn.Activated:Connect(function()
-        extended = not extended
-        extBtn.Text = extended and "收回" or "延伸"
-        Tw:Create(extFrame, TweenInfo.new(0.3), {Size=UDim2.fromOffset(64, extended and 120 or 0)}):Play()
-    end)
+    local isExpanded = false
 
-    btn.Activated:Connect(function()
-        if lockMode == "shiftlock" then clearAllModes()
-        else clearAllModes(); lockMode="shiftlock"; lockMouse(true); setFaceRotation("shiftlock")
-            icn.Image="rbxasset://textures/ui/mouseLock_on.png"
-            Tw:Create(btn,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(38,48,60)}):Play()
+    local function setExpanded(expand)
+        isExpanded = expand
+        local targetH = expand and expandedH or 0
+        Tw:Create(btnContainer, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.fromOffset(panelWidth, targetH)
+        }):Play()
+        Tw:Create(panel, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.fromOffset(panelWidth, toggleBtnH + targetH)
+        }):Play()
+        toggleBtn.Text = expand and "面向/ESP ▼" or "面向/ESP ▲"
+    end
+
+    -- ══════════════════════════
+    -- 拖曳（移動超過 5px 才算拖，防止誤觸）
+    -- ══════════════════════════
+    local isDragging = false
+    local dragMoved = false
+    local dragStartPos = nil
+    local panelStartPos = nil
+
+    toggleBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            isDragging = true
+            dragMoved = false
+            dragStartPos = input.Position
+            panelStartPos = panel.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    isDragging = false
+                end
+            end)
         end
     end)
 
-    nearBtn.Activated:Connect(function()
+    UIS.InputChanged:Connect(function(input)
+        if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStartPos
+            if delta.Magnitude > 5 then
+                dragMoved = true
+                panel.Position = UDim2.new(
+                    panelStartPos.X.Scale, panelStartPos.X.Offset + delta.X,
+                    panelStartPos.Y.Scale, panelStartPos.Y.Offset + delta.Y
+                )
+            end
+        end
+    end)
+
+    toggleBtn.MouseButton1Click:Connect(function()
+        if not dragMoved then
+            setExpanded(not isExpanded)
+        end
+        dragMoved = false
+    end)
+
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            isDragging = false
+        end
+    end)
+
+
+    -- ══════════════════════════
+    -- 按鈕邏輯
+    -- ══════════════════════════
+    nearBtn.MouseButton1Click:Connect(function()
         if lockMode == "nearest" then clearAllModes()
         else clearAllModes(); lockMode="nearest"; updateButtonState(nearBtn,true); setFaceRotation("nearest") end
     end)
 
-    clickBtn.Activated:Connect(function()
+    clickBtn.MouseButton1Click:Connect(function()
         if lockMode == "click" then clearAllModes()
         else
             clearAllModes(); lockMode="click"; updateButtonState(clickBtn,true)
@@ -1023,8 +1179,7 @@ task.spawn(function() pcall(function()
         end
     end)
 
-    -- 朝向中央按鈕（與其他朝向模式互斥）
-    centerBtn.Activated:Connect(function()
+    centerBtn.MouseButton1Click:Connect(function()
         if lockMode == "center" then clearAllModes()
         else clearAllModes(); lockMode="center"; updateButtonState(centerBtn,true); setFaceRotation("center") end
     end)
@@ -1040,7 +1195,7 @@ task.spawn(function() pcall(function()
         if espBoxes[p] then espBoxes[p]:Destroy(); espBoxes[p]=nil end
     end
 
-    espBtn.Activated:Connect(function()
+    espBtn.MouseButton1Click:Connect(function()
         espEnabled = not espEnabled
         updateButtonState(espBtn, espEnabled)
         if not espEnabled then
@@ -1084,28 +1239,7 @@ task.spawn(function() pcall(function()
         end
     end)
 
-    -- 拖曳
-    local dragging, dragStart, startPos
-    dragHandle.InputBegan:Connect(function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
-            dragging=true; dragStart=input.Position; startPos=btn.Position
-            Tw:Create(dragHandle,TweenInfo.new(0.1),{BackgroundColor3=Color3.fromRGB(150,150,160)}):Play()
-            input.Changed:Connect(function()
-                if input.UserInputState==Enum.UserInputState.End then
-                    dragging=false
-                    Tw:Create(dragHandle,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(100,100,110)}):Play()
-                end
-            end)
-        end
-    end)
-    UIS.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
-            local delta=input.Position-dragStart
-            btn.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+delta.X,startPos.Y.Scale,startPos.Y.Offset+delta.Y)
-        end
-    end)
-
-    xBtn.Activated:Connect(function()
+    xBtn.MouseButton1Click:Connect(function()
         clearAllModes()
         if espConn then espConn:Disconnect() end
         for p in pairs(espLabels) do cleanupESP(p) end
@@ -1117,10 +1251,4 @@ task.spawn(function() pcall(function()
         if lockMode ~= "none" then setFaceRotation(lockMode, targetPlayer) end
     end)
 
-    -- 預設啟動 ShiftLock（已停用）
-    -- task.wait(0.1)
-    -- lockMode="shiftlock"; lockMouse(true); setFaceRotation("shiftlock")
-    -- icn.Image="rbxasset://textures/ui/mouseLock_on.png"
-    -- Tw:Create(btn,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(38,48,60)}):Play()
-
-end) end)  -- 關閉 pcall 和 task.spawn
+end) end)
