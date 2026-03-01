@@ -170,28 +170,19 @@ end
 
 -- ══════════════════════════════════════════
 -- 修復鏡頭功能
--- 針對手機/平板上遊戲 bug 導致觸控鏡頭卡住無法移動
--- 修復方式：重置 CameraType + CameraMode，並重新連接 TouchEnabled 鏡頭
 -- ══════════════════════════════════════════
 local function applyFixCamera()
     local cam = Workspace.CurrentCamera
     if not cam then return end
-
-    -- 強制重置鏡頭類型和模式
     cam.CameraType = Enum.CameraType.Custom
     player.CameraMode = Enum.CameraMode.Classic
     player.CameraMinZoomDistance = 0.5
     player.CameraMaxZoomDistance = 500
-
-    -- 清除可能導致卡住的 CameraOffset
     local char = player.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum then hum.CameraOffset = Vector3.new(0,0,0) end
     end
-
-    -- 手機/平板觸控鏡頭卡住修復：
-    -- 透過短暫切換 CameraType 再切回來，強制 Roblox 重新初始化觸控鏡頭控制器
     task.delay(0.05, function()
         if Workspace.CurrentCamera then
             Workspace.CurrentCamera.CameraType = Enum.CameraType.Scriptable
@@ -213,17 +204,14 @@ local function startFixCamGuard()
         if not fixCamEnabled then return end
         local cam = Workspace.CurrentCamera
         if not cam then return end
-        -- 偵測 CameraType 被遊戲改掉
         if cam.CameraType ~= Enum.CameraType.Custom then
             cam.CameraType = Enum.CameraType.Custom
         end
-        -- 偵測 CameraMode 被遊戲強制 LockFirstPerson（不是玩家縮小）
         if player.CameraMode == Enum.CameraMode.LockFirstPerson then
             player.CameraMode = Enum.CameraMode.Classic
             player.CameraMinZoomDistance = 0.5
             player.CameraMaxZoomDistance = 500
         end
-        -- 確保 MaxZoom 不被遊戲壓縮
         if player.CameraMaxZoomDistance < 10 then
             player.CameraMaxZoomDistance = 500
         end
@@ -457,11 +445,10 @@ local speedFrame,speedInput,speedButton=createControlRow(page1,"速度:","25","2
 local jumpFrame,jumpInput,jumpButton=createControlRow(page1,"跳躍:","75","75",true,2)
 local gravFrame,gravInput,gravButton=createControlRow(page1,"重力:","50","50",true,3)
 
--- 頁面2：視野燈光（鏡頭距離預設125，修復鏡頭排在鏡頭距離後面 order=3，原本的往後推）
+-- 頁面2：視野燈光
 local fullbrightFrame,fullbrightInput,fullbrightButton=createControlRow(page2,"全亮:","0.8","0.8",true,1)
 local cameraDistFrame,cameraDistInput,cameraDistButton=createControlRow(page2,"鏡頭距離:","125","125",true,2)
 
--- 修復鏡頭列（按鈕文字固定「修復」，按下執行一次，不做開關）
 local fixCamFrame=Instance.new("Frame"); fixCamFrame.Size=UDim2.new(1,0,0,32); fixCamFrame.BackgroundColor3=Color3.fromRGB(248,249,250); fixCamFrame.LayoutOrder=3; fixCamFrame.Parent=page2; Instance.new("UICorner",fixCamFrame).CornerRadius=UDim.new(0,6)
 local fixCamLabel=Instance.new("TextLabel"); fixCamLabel.Size=UDim2.new(0,95,1,0); fixCamLabel.Position=UDim2.new(0,6,0,0); fixCamLabel.BackgroundTransparency=1; fixCamLabel.Text="修復鏡頭:"; fixCamLabel.TextSize=12; fixCamLabel.Font=Enum.Font.GothamBold; fixCamLabel.TextColor3=Color3.fromRGB(85,85,85); fixCamLabel.TextXAlignment=Enum.TextXAlignment.Left; fixCamLabel.Parent=fixCamFrame
 local fixCamStatusText=Instance.new("TextLabel"); fixCamStatusText.Size=UDim2.new(0,55,0,22); fixCamStatusText.Position=UDim2.new(0,100,0,5); fixCamStatusText.BackgroundTransparency=1; fixCamStatusText.Text="待機"; fixCamStatusText.TextSize=12; fixCamStatusText.Font=Enum.Font.Gotham; fixCamStatusText.TextColor3=Color3.fromRGB(150,150,150); fixCamStatusText.Parent=fixCamFrame
@@ -577,13 +564,10 @@ brightnessButton.MouseButton1Click:Connect(function()
     updateLighting(); toggleUIState(brightnessButton,brightnessFrame,brightnessInput,toggles.brightness)
 end)
 
--- 修復鏡頭按鈕（按一次執行功能，按鈕文字永遠保持「修復」）
 fixCamButton.MouseButton1Click:Connect(function()
-    -- 執行修復（不做開關，每次按都重新修復一次）
     fixCamEnabled = true
     applyFixCamera()
     if not fixCamConn then startFixCamGuard() end
-    -- 短暫閃爍回饋
     fixCamButton.BackgroundColor3 = Color3.fromRGB(46,125,50)
     fixCamStatusText.Text = "已修復"
     fixCamStatusText.TextColor3 = Color3.fromRGB(46,125,50)
@@ -658,7 +642,6 @@ cameraDistButton.MouseButton1Click:Connect(function()
         player.CameraMaxZoomDistance=values.cameraDist; player.CameraMinZoomDistance=values.cameraDist
         if player.Character then local hum=player.Character:FindFirstChildOfClass("Humanoid"); if hum then hum.CameraOffset=Vector3.new(0,0,0) end end
         task.delay(0.1,function() if toggles.cameraDist then player.CameraMinZoomDistance=0.5 end end)
-        -- 啟動第一人稱守護（只防遊戲強制，不防玩家自己縮小）
         if connections.camDistGuard then connections.camDistGuard:Disconnect() end
         local lastGameForcedCheck = tick()
         connections.camDistGuard = RunService.Heartbeat:Connect(function()
@@ -666,8 +649,6 @@ cameraDistButton.MouseButton1Click:Connect(function()
                 if connections.camDistGuard then connections.camDistGuard:Disconnect(); connections.camDistGuard=nil end
                 return
             end
-            -- 只在 CameraMode 被遊戲強制設成 LockFirstPerson 時才介入
-            -- 玩家自己把鏡頭滾輪縮到 0 不會觸發 LockFirstPerson，所以這裡是安全的
             if player.CameraMode == Enum.CameraMode.LockFirstPerson then
                 player.CameraMode = Enum.CameraMode.Classic
                 player.CameraMinZoomDistance = 0.5
@@ -842,7 +823,7 @@ auraToggleBtn.MouseButton1Click:Connect(function()
     updateStatus()
 end)
 
--- 拖曳（加入 sinkInput 防止拖曳時移動鏡頭）
+-- 拖曳
 local function enableDrag(frame, dragHandle)
     local dragging=false; local dragInput,dragStart,startPos
     local function update(input)
@@ -895,8 +876,7 @@ task.spawn(function() if player.Character then task.wait(0.1); getOriginalValues
 
 
 -- ══════════════════════════════════════════
--- ESP + 面向玩家功能（ShiftLock 已移除）
--- 面向/ESP 浮動面板支援拖曳，且拖曳時不影響鏡頭
+-- ESP + 面向玩家功能
 -- ══════════════════════════════════════════
 task.spawn(function() pcall(function()
     local ref = cloneref or function(x) return x end
@@ -995,10 +975,6 @@ task.spawn(function() pcall(function()
         end)
     end
 
-    -- ══════════════════════════
-    -- 面向/ESP 浮動面板 UI
-    -- panel 錨點右下，toggleBtn 固定在底，btnContainer 緊貼 toggleBtn 正上方往上展開
-    -- ══════════════════════════
     local panelWidth = 80
     local btnH = 30
     local btnGap = 3
@@ -1006,7 +982,6 @@ task.spawn(function() pcall(function()
     local expandedH = numBtns * btnH + (numBtns - 1) * btnGap
     local toggleBtnH = 28
 
-    -- 外層容器，AnchorPoint 右下角，panel 高度隨展開變化
     local panel = Instance.new("Frame")
     panel.Name = "AnchorPanel"
     panel.AnchorPoint = Vector2.new(1, 1)
@@ -1016,7 +991,6 @@ task.spawn(function() pcall(function()
     panel.ClipsDescendants = false
     panel.Parent = gui
 
-    -- 主切換按鈕（固定在 panel 底部，AnchorPoint 左下）
     local toggleBtn = Instance.new("TextButton")
     toggleBtn.AnchorPoint = Vector2.new(0, 1)
     toggleBtn.Size = UDim2.fromOffset(panelWidth, toggleBtnH)
@@ -1030,7 +1004,6 @@ task.spawn(function() pcall(function()
     toggleBtn.Parent = panel
     Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0,6)
 
-    -- 關閉按鈕（x，圓角正方形，貼在主按鈕右側同高）
     local xBtn = Instance.new("TextButton")
     xBtn.Size = UDim2.fromOffset(22, 22)
     xBtn.AnchorPoint = Vector2.new(0, 1)
@@ -1044,7 +1017,6 @@ task.spawn(function() pcall(function()
     xBtn.Parent = panel
     Instance.new("UICorner", xBtn).CornerRadius = UDim.new(0,5)
 
-    -- 功能按鈕容器（緊貼 toggleBtn 正上方，ClipsDescendants 做展開動畫）
     local btnContainer = Instance.new("Frame")
     btnContainer.AnchorPoint = Vector2.new(0, 1)
     btnContainer.Size = UDim2.fromOffset(panelWidth, 0)
@@ -1088,9 +1060,6 @@ task.spawn(function() pcall(function()
         toggleBtn.Text = expand and "面向/ESP ▼" or "面向/ESP ▲"
     end
 
-    -- ══════════════════════════
-    -- 拖曳（移動超過 5px 才算拖，防止誤觸）
-    -- ══════════════════════════
     local isDragging = false
     local dragMoved = false
     local dragStartPos = nil
@@ -1139,10 +1108,6 @@ task.spawn(function() pcall(function()
         end
     end)
 
-
-    -- ══════════════════════════
-    -- 按鈕邏輯
-    -- ══════════════════════════
     nearBtn.MouseButton1Click:Connect(function()
         if lockMode == "nearest" then clearAllModes()
         else clearAllModes(); lockMode="nearest"; updateButtonState(nearBtn,true); setFaceRotation("nearest") end
@@ -1212,12 +1177,14 @@ task.spawn(function() pcall(function()
                         if char and hrp and hum and hum.Health > 0 then
                             if not espLabels[p] then
                                 local bg=Instance.new("BillboardGui")
-                                bg.Size=UDim2.fromOffset(200,50); bg.AlwaysOnTop=true
+                                bg.Size=UDim2.fromOffset(200,70); bg.AlwaysOnTop=true
                                 bg.StudsOffset=Vector3.new(0,3,0); bg.Parent=gui
                                 local tl=Instance.new("TextLabel")
                                 tl.Size=UDim2.fromScale(1,1); tl.BackgroundTransparency=1
                                 tl.TextColor3=Color3.new(1,1,1); tl.TextStrokeTransparency=0.5
-                                tl.TextSize=14; tl.Font=Enum.Font.SourceSansBold; tl.Parent=bg
+                                tl.TextSize=14; tl.Font=Enum.Font.SourceSansBold
+                                tl.TextXAlignment=Enum.TextXAlignment.Center
+                                tl.Parent=bg
                                 espLabels[p]={billboard=bg,label=tl}
                             end
                             if not espBoxes[p] then
@@ -1226,10 +1193,31 @@ task.spawn(function() pcall(function()
                                 box.Transparency=0.7; box.Color3=Color3.new(1,1,1); box.Parent=gui
                                 espBoxes[p]=box
                             end
+
+                            -- ══════════════════════════════════════════
+                            -- 讀取 leaderstats（Glove / Slaps）
+                            -- ══════════════════════════════════════════
+                            local glove = "?"
+                            local slaps = "?"
+                            local ls = p:FindFirstChild("leaderstats")
+                            if ls then
+                                local g = ls:FindFirstChild("Glove")
+                                local s = ls:FindFirstChild("Slaps")
+                                if g then glove = tostring(g.Value) end
+                                if s then slaps = tostring(s.Value) end
+                            end
+
                             local dist=myHRP and (myHRP.Position-hrp.Position).Magnitude or 0
                             local lab=espLabels[p]
                             lab.billboard.Adornee=hrp
-                            lab.label.Text=string.format("名: %s\n血量: %.0f\n距離: %.1f",p.Name,hum.Health,dist)
+                            -- 格式：名字 / Glove/Slaps / 血量:當前/最大 / 距離
+                            lab.label.Text=string.format(
+                                "名: %s\n%s/%s\n血量: %.0f/%.0f\n距離: %.1f",
+                                p.Name,
+                                glove, slaps,
+                                hum.Health, hum.MaxHealth,
+                                dist
+                            )
                             espBoxes[p].Adornee=char; espBoxes[p].Size=char:GetExtentsSize()
                         else cleanupESP(p) end
                     end
