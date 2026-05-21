@@ -226,11 +226,25 @@ local auraPendingFire = false
 local function startAuraHook()
     if auraHookActive then return end
     auraHookActive = true
+
+    -- 黑名單：這些事件只讓玩家手動觸發，不被 Aura 自動循環
+    local AURA_EVENT_BLACKLIST = {
+        ["GeneralAbility"] = true,
+        ["HunterAbility"]  = true,
+        ["AirStrike"]      = true,
+    }
+
     local origNamecall
     origNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
         local result = origNamecall(self, ...)
         if auraEnabled and method == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+
+            -- 黑名單事件直接跳過，不捕獲也不自動觸發
+            if AURA_EVENT_BLACKLIST[self.Name] then
+                return result
+            end
+
             local args = {...}
             local found = false
             for _, v in ipairs(args) do
