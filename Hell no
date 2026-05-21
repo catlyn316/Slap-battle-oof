@@ -345,9 +345,7 @@ local function fireExtendedAttack()
 
             if dist <= 23 then
                 local dir = (tPos - myPos).Unit
-                local dot = myLook:Dot(dir)
-                -- 限制 dot 在 acos 合法範圍內避免 NaN
-                dot = math.clamp(dot, -1, 1)
+                local dot = math.clamp(myLook:Dot(dir), -1, 1)
                 local angle = math.deg(math.acos(dot))
 
                 if angle <= 35 then
@@ -360,7 +358,6 @@ local function fireExtendedAttack()
         end
     end
 
-    -- 只有真的打到人才更新冷卻，避免空轉鎖住冷卻
     if fired then
         extendedCooldown = now
     end
@@ -372,10 +369,12 @@ RunService.Heartbeat:Connect(function()
     local glove = getLocalGlove()
 
     if glove == "Extended" then
-        -- Extended：獨立輪詢，不依賴 auraPendingFire
+        -- Extended：等待 auraPendingFire，跟普通手套一樣靠手動觸發
+        if not auraPendingFire then return end
+        auraPendingFire = false
         fireExtendedAttack()
     else
-        -- 其他手套：依賴 hook 偵測的 auraPendingFire
+        -- 其他手套：hook 事件循環
         if not auraPendingFire then return end
         if #auraDetectedEvents == 0 then auraPendingFire = false; return end
         auraPendingFire = false
