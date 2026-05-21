@@ -33,7 +33,7 @@ local values = {
     cameraDist=125, brightness=2, wallTrans=0.8, floatSpeed=1, auraRange=17
 }
 local connections = {
-    speed=nil, jump=nil, gravity=nil, fullbright=nil,
+    speed=nil, jump=nil, gravity=nil, gravityGuard=nil, fullbright=nil,
     nofog=nil, brightness=nil, noclipWall=nil, noclip=nil, noFilter=nil,
     fixCam=nil, camDistGuard=nil
 }
@@ -313,14 +313,68 @@ local function getNearestInRange(range)
     return nearest
 end
 
+-- 工具函數：取得本地玩家手套名稱
+local function getLocalGlove()
+    local ls = player:FindFirstChild("leaderstats")
+    if ls then
+        local g = ls:FindFirstChild("Glove")
+        if g then return tostring(g.Value) end
+    end
+    return ""
+end
+
+-- Extended 手套打擊：照第二份腳本的邏輯
+local extendedCooldown = 0
+local function fireExtendedAttack()
+    local now = tick()
+    if now - extendedCooldown < 0.6 then return end
+    extendedCooldown = now
+
+    local char = player.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
+    local myPos = char.HumanoidRootPart.Position
+    local myLook = char.HumanoidRootPart.CFrame.LookVector
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and p.Character
+            and p.Character:FindFirstChild("HumanoidRootPart")
+            and p.Character:FindFirstChild("Head") then
+
+            local tPos = p.Character.HumanoidRootPart.Position
+            local dist = (tPos - myPos).Magnitude
+
+            if dist <= 23 then
+                local dir = (tPos - myPos).Unit
+                local angle = math.deg(math.acos(myLook:Dot(dir)))
+                if angle <= 35 then
+                    pcall(function()
+                        ReplicatedStorage.b:FireServer(p.Character.Head)
+                    end)
+                end
+            end
+        end
+    end
+end
+
 RunService.Heartbeat:Connect(function()
     if not auraEnabled then return end
     if not auraPendingFire then return end
-    if #auraDetectedEvents == 0 then auraPendingFire=false; return end
+
     auraPendingFire = false
     auraLastFire = tick()
-    local target = getNearestInRange(values.auraRange)
-    if target then fireAllAuraEvents(target) end
+
+    local glove = getLocalGlove()
+
+    if glove == "Extended" then
+        -- Extended 手套：用擴張打擊範圍邏輯
+        fireExtendedAttack()
+    else
+        -- 其他手套：用原本的 hook 事件循環
+        if #auraDetectedEvents == 0 then return end
+        local target = getNearestInRange(values.auraRange)
+        if target then fireAllAuraEvents(target) end
+    end
 end)
 
 player.CharacterAdded:Connect(function(newChar)
@@ -552,18 +606,71 @@ jumpButton.MouseButton1Click:Connect(function()
     toggleUIState(jumpButton,jumpFrame,jumpInput,toggles.jump)
 end)
 
+-- ragdoll 偵測工具函數
+local function isRagdolled(char)
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    -- 常見判斷方式：HumanoidStateType 為 Physics 或 FallingDown
+    local state = hum:GetState()
+    return state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.FallingDown
+        or state == Enum.HumanoidStateType.Ragdoll
+end
+
 gravButton.MouseButton1Click:Connect(function()
-    toggles.gravity=not toggles.gravity
+    toggles.gravity = not toggles.gravity
+
     if toggles.gravity then
         if not hasOriginalValues then getOriginalValues() end
-        values.gravity=tonumber(gravInput.Text) or 50; Workspace.Gravity=values.gravity
+        values.gravity = tonumber(gravInput.Text) or 50
+
         if connections.gravity then connections.gravity:Disconnect() end
-        connections.gravity=Workspace:GetPropertyChangedSignal("Gravity"):Connect(function() if toggles.gravity then Workspace.Gravity=values.gravity end end)
+
+        -- 斷開舊的 Heartbeat 守護
+        if connections.gravityGuard then connections.gravityGuard:Disconnect() end
+
+        local isLower = values.gravity < 196.2
+
+        -- 立刻套用初始值
+        local char = player.Character
+        local ragdolled = isRagdolled(char)
+        if isLower then
+            -- 輸入值 < 196.2：正常時用自訂，ragdoll 時用 196.2
+            Workspace.Gravity = ragdolled and 196.2 or values.gravity
+        else
+            -- 輸入值 > 196.2：正常時用 196.2，ragdoll 時用自訂
+            Workspace.Gravity = ragdolled and values.gravity or 196.2
+        end
+
+        -- 用 Heartbeat 持續偵測 ragdoll 狀態
+        connections.gravityGuard = game:GetService("RunService").Heartbeat:Connect(function()
+            if not toggles.gravity then
+                connections.gravityGuard:Disconnect()
+                connections.gravityGuard = nil
+                return
+            end
+            local c = player.Character
+            local r = isRagdolled(c)
+            local targetGravity
+            if isLower then
+                targetGravity = r and 196.2 or values.gravity
+            else
+                targetGravity = r and values.gravity or 196.2
+            end
+            if math.abs(Workspace.Gravity - targetGravity) > 0.01 then
+                Workspace.Gravity = targetGravity
+            end
+        end)
+
     else
-        Workspace.Gravity=originalGravity
-        if connections.gravity then connections.gravity:Disconnect() end
+        -- 關閉：還原重力並清理連接
+        if connections.gravity then connections.gravity:Disconnect(); connections.gravity = nil end
+        if connections.gravityGuard then connections.gravityGuard:Disconnect(); connections.gravityGuard = nil end
+        Workspace.Gravity = originalGravity
     end
-    toggleUIState(gravButton,gravFrame,gravInput,toggles.gravity)
+
+    toggleUIState(gravButton, gravFrame, gravInput, toggles.gravity)
 end)
 
 fullbrightButton.MouseButton1Click:Connect(function()
