@@ -7,6 +7,7 @@ local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 if CoreGui:FindFirstChild("SpeedJumpController") then CoreGui.SpeedJumpController:Destroy() end
 if playerGui:FindFirstChild("SpeedJumpController") then playerGui.SpeedJumpController:Destroy() end
