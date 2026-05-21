@@ -313,7 +313,6 @@ local function getNearestInRange(range)
     return nearest
 end
 
--- 工具函數：取得本地玩家手套名稱
 local function getLocalGlove()
     local ls = player:FindFirstChild("leaderstats")
     if ls then
@@ -323,18 +322,17 @@ local function getLocalGlove()
     return ""
 end
 
--- Extended 手套打擊：照第二份腳本的邏輯
 local extendedCooldown = 0
 local function fireExtendedAttack()
     local now = tick()
     if now - extendedCooldown < 0.6 then return end
-    extendedCooldown = now
 
     local char = player.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return end
 
     local myPos = char.HumanoidRootPart.Position
     local myLook = char.HumanoidRootPart.CFrame.LookVector
+    local fired = false
 
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= player and p.Character
@@ -346,32 +344,41 @@ local function fireExtendedAttack()
 
             if dist <= 23 then
                 local dir = (tPos - myPos).Unit
-                local angle = math.deg(math.acos(myLook:Dot(dir)))
+                local dot = myLook:Dot(dir)
+                -- 限制 dot 在 acos 合法範圍內避免 NaN
+                dot = math.clamp(dot, -1, 1)
+                local angle = math.deg(math.acos(dot))
+
                 if angle <= 35 then
                     pcall(function()
                         ReplicatedStorage.b:FireServer(p.Character.Head)
                     end)
+                    fired = true
                 end
             end
         end
+    end
+
+    -- 只有真的打到人才更新冷卻，避免空轉鎖住冷卻
+    if fired then
+        extendedCooldown = now
     end
 end
 
 RunService.Heartbeat:Connect(function()
     if not auraEnabled then return end
-    if not auraPendingFire then return end
-
-    auraPendingFire = false
-    auraLastFire = tick()
 
     local glove = getLocalGlove()
 
     if glove == "Extended" then
-        -- Extended 手套：用擴張打擊範圍邏輯
+        -- Extended：獨立輪詢，不依賴 auraPendingFire
         fireExtendedAttack()
     else
-        -- 其他手套：用原本的 hook 事件循環
-        if #auraDetectedEvents == 0 then return end
+        -- 其他手套：依賴 hook 偵測的 auraPendingFire
+        if not auraPendingFire then return end
+        if #auraDetectedEvents == 0 then auraPendingFire = false; return end
+        auraPendingFire = false
+        auraLastFire = tick()
         local target = getNearestInRange(values.auraRange)
         if target then fireAllAuraEvents(target) end
     end
@@ -606,16 +613,11 @@ jumpButton.MouseButton1Click:Connect(function()
     toggleUIState(jumpButton,jumpFrame,jumpInput,toggles.jump)
 end)
 
--- ragdoll 偵測工具函數
 local function isRagdolled(char)
     if not char then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return false end
-    -- 常見判斷方式：HumanoidStateType 為 Physics 或 FallingDown
-    local state = hum:GetState()
-    return state == Enum.HumanoidStateType.Physics
-        or state == Enum.HumanoidStateType.FallingDown
-        or state == Enum.HumanoidStateType.Ragdoll
+    local ragdolled = char:FindFirstChild("Ragdolled")
+    if ragdolled then return ragdolled.Value == true end
+    return false
 end
 
 gravButton.MouseButton1Click:Connect(function()
